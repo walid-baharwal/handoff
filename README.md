@@ -36,14 +36,45 @@ Download the binary for your system from the repository's **Releases** page:
 | macOS Intel | `handoff-darwin-amd64` |
 | macOS Apple Silicon | `handoff-darwin-arm64` |
 
-On Linux x86-64, make the download executable and place it on your `PATH`:
+### Linux
+
+Install the downloaded binary system-wide (replace the filename with
+`handoff-linux-arm64` on ARM64):
 
 ```bash
-chmod +x handoff-*
-sudo install handoff-linux-amd64 /usr/local/bin/handoff
+sudo install -m 755 ~/Downloads/handoff-linux-amd64 /usr/local/bin/handoff
+handoff version
 ```
 
-Use the matching filename on Linux ARM64 or macOS. Windows users can rename the downloaded file to `handoff.exe` and add its directory to `PATH`.
+### Windows
+
+Run these commands in PowerShell:
+
+```powershell
+New-Item -ItemType Directory -Force "$HOME\bin" | Out-Null
+Copy-Item "$HOME\Downloads\handoff-windows-amd64.exe" "$HOME\bin\handoff.exe"
+[Environment]::SetEnvironmentVariable("Path", [Environment]::GetEnvironmentVariable("Path", "User") + ";$HOME\bin", "User")
+$env:Path += ";$HOME\bin"
+handoff version
+```
+
+### macOS
+
+For Apple Silicon (`M1`, `M2`, `M3`, or newer):
+
+```bash
+sudo mkdir -p /usr/local/bin
+sudo install -m 755 ~/Downloads/handoff-darwin-arm64 /usr/local/bin/handoff
+handoff version
+```
+
+For an Intel Mac, use `handoff-darwin-amd64` instead. If macOS blocks the
+unsigned binary, allow this specific download and try again:
+
+```bash
+sudo xattr -d com.apple.quarantine /usr/local/bin/handoff
+handoff version
+```
 
 ## Use
 
@@ -52,6 +83,12 @@ Every developer configures the same server URL and shared team token once:
 ```bash
 handoff setup --server https://handoff.example.com
 ```
+
+`setup` can be run from anywhere and saves the configuration for the current
+user. Enter the server's `HANDOFF_TOKEN` when prompted.
+
+Run the remaining commands from inside the Git repository whose changes you
+want to transfer.
 
 Upload all current changes:
 
