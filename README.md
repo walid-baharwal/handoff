@@ -155,3 +155,7 @@ CI runs tests on every push and pull request. Pushing a version tag builds all s
 git tag v0.1.0
 git push origin v0.1.0
 ```
+
+## License
+
+Handoff is available under the [MIT License](LICENSE).
