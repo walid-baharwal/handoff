@@ -1,0 +1,22 @@
+services:
+  handoff:
+    build: .
+    restart: unless-stopped
+    environment:
+      HANDOFF_TOKEN: ${HANDOFF_TOKEN:?Set HANDOFF_TOKEN}
+      HANDOFF_DATA_DIR: /data
+      HANDOFF_DOWNLOAD_DIR: /downloads
+      HANDOFF_MAX_BYTES: "104857600"
+      HANDOFF_RETENTION: 720h
+    expose:
+      - "8080"
+    volumes:
+      - handoff_data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  handoff_data:

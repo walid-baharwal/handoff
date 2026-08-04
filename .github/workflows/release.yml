@@ -1,0 +1,37 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Test
+        run: go test ./...
+      - name: Build binaries
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          LDFLAGS="-s -w -X main.version=$VERSION"
+          mkdir dist
+          GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="$LDFLAGS" -o dist/handoff-linux-amd64 .
+          GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="$LDFLAGS" -o dist/handoff-linux-arm64 .
+          GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="$LDFLAGS" -o dist/handoff-windows-amd64.exe .
+          GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags="$LDFLAGS" -o dist/handoff-darwin-amd64 .
+          GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags="$LDFLAGS" -o dist/handoff-darwin-arm64 .
+          cd dist
+          sha256sum handoff-* > SHA256SUMS
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes
