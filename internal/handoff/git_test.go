@@ -1,134 +1,16 @@
-package main
+package handoff
 
 import (
-	"archive/tar"
 	"bytes"
-	"compress/gzip"
-	"encoding/json"
-	"fmt"
 	"io"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
 
 const testID = "abcdef123456"
-
-func TestServerUploadDownloadAndCleanup(t *testing.T) {
-	dataDir := t.TempDir()
-	service, err := newService(serviceConfig{
-		Token:       strings.Repeat("t", 32),
-		DataDir:     dataDir,
-		DownloadDir: t.TempDir(),
-		MaxBytes:    8,
-		Retention:   time.Hour,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	server := httptest.NewServer(service.routes())
-	defer server.Close()
-
-	response := request(t, http.MethodPost, server.URL+"/api/v1/handoffs", "bad", []byte("code"))
-	if response.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("unauthenticated upload status = %d", response.StatusCode)
-	}
-	response.Body.Close()
-
-	response = request(t, http.MethodPost, server.URL+"/api/v1/handoffs", strings.Repeat("t", 32), []byte("code"))
-	if response.StatusCode != http.StatusCreated {
-		t.Fatalf("upload status = %d: %s", response.StatusCode, readBody(response.Body))
-	}
-	var uploaded struct {
-		ID string `json:"id"`
-	}
-	if err := json.NewDecoder(response.Body).Decode(&uploaded); err != nil {
-		t.Fatal(err)
-	}
-	response.Body.Close()
-	if !idPattern.MatchString(uploaded.ID) {
-		t.Fatalf("invalid id %q", uploaded.ID)
-	}
-
-	response = request(t, http.MethodGet, server.URL+"/api/v1/handoffs/"+uploaded.ID, strings.Repeat("t", 32), nil)
-	if response.StatusCode != http.StatusOK || readBody(response.Body) != "code" {
-		t.Fatal("download did not return the uploaded bytes")
-	}
-
-	response = request(t, http.MethodPost, server.URL+"/api/v1/handoffs", strings.Repeat("t", 32), []byte("too large"))
-	if response.StatusCode != http.StatusRequestEntityTooLarge {
-		t.Fatalf("oversized upload status = %d", response.StatusCode)
-	}
-	response.Body.Close()
-
-	packagePath := filepath.Join(dataDir, uploaded.ID+".handoff")
-	old := time.Now().Add(-2 * time.Hour)
-	if err := os.Chtimes(packagePath, old, old); err != nil {
-		t.Fatal(err)
-	}
-	service.cleanupExpired()
-	if _, err := os.Stat(packagePath); !os.IsNotExist(err) {
-		t.Fatal("expired package was not removed")
-	}
-}
-
-func TestClientServerRoundTrip(t *testing.T) {
-	token := strings.Repeat("c", 32)
-	service, err := newService(serviceConfig{
-		Token:       token,
-		DataDir:     t.TempDir(),
-		DownloadDir: t.TempDir(),
-		MaxBytes:    defaultMaxBytes,
-		Retention:   time.Hour,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	server := httptest.NewServer(service.routes())
-	defer server.Close()
-
-	source := filepath.Join(t.TempDir(), "source.handoff")
-	destination := filepath.Join(t.TempDir(), "downloaded.handoff")
-	writeFile(t, source, "exact package bytes")
-	cfg := clientConfig{Server: server.URL, Token: token}
-	id, err := uploadPackage(cfg, source)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := downloadPackage(cfg, id, destination); err != nil {
-		t.Fatal(err)
-	}
-	assertFile(t, destination, "exact package bytes")
-}
-
-func TestPackageRejectsChecksumWhenBundleComesFirst(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "bad.handoff")
-	metadata := manifest{
-		Version:      packageVersion,
-		BaseCommit:   strings.Repeat("a", 40),
-		Commit:       strings.Repeat("b", 40),
-		Ref:          "refs/handoff/outgoing/abcd",
-		CreatedAt:    time.Now().UTC(),
-		BundleSHA256: strings.Repeat("0", 64),
-	}
-	manifestBytes, err := json.Marshal(metadata)
-	if err != nil {
-		t.Fatal(err)
-	}
-	writeArchive(t, path, []archiveEntry{
-		{name: "changes.bundle", data: []byte("tampered")},
-		{name: "manifest.json", data: manifestBytes},
-	})
-	_, _, err = extractPackage(path, t.TempDir(), 1024)
-	if err == nil || !strings.Contains(err.Error(), "checksum mismatch") {
-		t.Fatalf("expected checksum error, got %v", err)
-	}
-}
 
 func TestGitHandoffRegression(t *testing.T) {
 	t.Run("abort before backup preserves untouched local changes", func(t *testing.T) {
@@ -450,89 +332,9 @@ func git(t *testing.T, dir string, args ...string) string {
 	return strings.TrimSpace(stdout.String())
 }
 
-func writeFile(t *testing.T, path, content string) {
-	t.Helper()
-	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func assertFile(t *testing.T, path, want string) {
-	t.Helper()
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(data) != want {
-		t.Fatalf("%s = %q, want %q", path, data, want)
-	}
-}
-
 func assertNoState(t *testing.T, repo string) {
 	t.Helper()
 	if _, err := os.Stat(statePath(repo)); !os.IsNotExist(err) {
 		t.Fatalf("handoff state remains: %v", err)
 	}
-}
-
-func request(t *testing.T, method, url, token string, body []byte) *http.Response {
-	t.Helper()
-	request, err := http.NewRequest(method, url, bytes.NewReader(body))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if token != "" {
-		request.Header.Set("Authorization", "Bearer "+token)
-	}
-	response, err := http.DefaultClient.Do(request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return response
-}
-
-func readBody(body io.ReadCloser) string {
-	defer body.Close()
-	data, _ := io.ReadAll(body)
-	return string(data)
-}
-
-type archiveEntry struct {
-	name string
-	data []byte
-}
-
-func writeArchive(t *testing.T, path string, entries []archiveEntry) {
-	t.Helper()
-	file, err := os.Create(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	gzipWriter := gzip.NewWriter(file)
-	tarWriter := tar.NewWriter(gzipWriter)
-	for _, entry := range entries {
-		if err := tarWriter.WriteHeader(&tar.Header{Name: entry.name, Mode: 0o600, Size: int64(len(entry.data))}); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := tarWriter.Write(entry.data); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := tarWriter.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := gzipWriter.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := file.Close(); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func Example_usage() {
-	fmt.Println("handoff push -m backend-ready")
-	fmt.Println("handoff pull abcdef123456")
-	// Output:
-	// handoff push -m backend-ready
-	// handoff pull abcdef123456
 }

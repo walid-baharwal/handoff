@@ -168,13 +168,20 @@ The Compose volume `handoff_data` keeps uploaded packages across restarts.
 
 Packages are protected in transit by HTTPS and access-controlled by the shared token. They are not encrypted on disk; anyone with server filesystem access can read them.
 
+## Project structure
+
+```text
+cmd/handoff/       executable entrypoint
+internal/handoff/  client, server, Git transfer, packaging, and domain tests
+```
+
 ## Build and test
 
 With Go 1.24 and Git installed:
 
 ```bash
 go test ./...
-go build -o handoff .
+go build -o handoff ./cmd/handoff
 ```
 
 Or use Docker:

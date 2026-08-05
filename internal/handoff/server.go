@@ -1,4 +1,4 @@
-package main
+package handoff
 
 import (
 	"crypto/rand"
@@ -100,7 +100,7 @@ func (s *service) handleHome(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	fmt.Fprintf(w, "Handoff %s\n\nDownload a client from /downloads/ and run:\n  handoff setup --server %s://%s\n", version, forwardedScheme(r), r.Host)
+	fmt.Fprintf(w, "Handoff %s\n\nDownload a client from /downloads/ and run:\n  handoff setup --server %s://%s\n", Version, forwardedScheme(r), r.Host)
 }
 
 func forwardedScheme(r *http.Request) string {
