@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -17,16 +16,15 @@ import (
 )
 
 func runList(args []string, stdout io.Writer) error {
-	fs := flag.NewFlagSet("list", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
+	fs := newSilentFlagSet("list")
 	all := fs.Bool("all", false, "list handoffs from every repository")
 	jsonOutput := fs.Bool("json", false, "print machine-readable JSON")
 	limit := fs.Int("limit", 20, "maximum number of handoffs")
 	if err := fs.Parse(args); err != nil {
-		return err
+		return invalidArguments(err.Error())
 	}
 	if len(fs.Args()) != 0 || *limit < 1 || *limit > 100 {
-		return errors.New("usage: handoff list [--all] [--json] [--limit N]")
+		return invalidArguments("usage: handoff list [--all] [--json] [--limit N]")
 	}
 	cfg, err := loadConfig()
 	if err != nil {
@@ -44,9 +42,31 @@ func runList(args []string, stdout io.Writer) error {
 		return err
 	}
 	if *jsonOutput {
-		encoder := json.NewEncoder(stdout)
-		encoder.SetIndent("", "  ")
-		return encoder.Encode(handoffListResponse{Handoffs: items})
+		handoffs := make([]integrationHandoff, 0, len(items))
+		for _, item := range items {
+			handoffs = append(handoffs, integrationHandoffFromMetadata(item))
+		}
+		scope := "repository"
+		if *all {
+			scope = "all"
+		}
+		responseProject := project
+		if *all {
+			responseProject = ""
+		}
+		return writeIntegrationJSON(stdout, "list", struct {
+			Scope        string               `json:"scope"`
+			Project      string               `json:"project,omitempty"`
+			RepositoryID string               `json:"repository_id,omitempty"`
+			Limit        int                  `json:"limit"`
+			Handoffs     []integrationHandoff `json:"handoffs"`
+		}{
+			Scope:        scope,
+			Project:      responseProject,
+			RepositoryID: repositoryID,
+			Limit:        *limit,
+			Handoffs:     handoffs,
+		})
 	}
 	if len(items) == 0 {
 		fmt.Fprintf(stdout, "No handoffs are available for %s.\n", printable(project))
@@ -57,16 +77,26 @@ func runList(args []string, stdout io.Writer) error {
 }
 
 func runInspect(args []string, stdout io.Writer) error {
-	if len(args) != 1 || !idPattern.MatchString(strings.ToLower(args[0])) {
-		return errors.New("usage: handoff inspect ID")
+	fs := newSilentFlagSet("inspect")
+	jsonOutput := fs.Bool("json", false, "print machine-readable JSON")
+	if err := fs.Parse(args); err != nil {
+		return invalidArguments(err.Error())
+	}
+	if len(fs.Args()) != 1 || !idPattern.MatchString(strings.ToLower(fs.Args()[0])) {
+		return invalidArguments("usage: handoff inspect [--json] ID")
 	}
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
 	}
-	record, err := getHandoffMetadata(cfg, strings.ToLower(args[0]))
+	record, err := getHandoffMetadata(cfg, strings.ToLower(fs.Args()[0]))
 	if err != nil {
 		return err
+	}
+	if *jsonOutput {
+		return writeIntegrationJSON(stdout, "inspect", struct {
+			Handoff integrationHandoff `json:"handoff"`
+		}{Handoff: integrationHandoffFromMetadata(record)})
 	}
 	printHandoffMetadata(stdout, record)
 	return nil
@@ -90,7 +120,7 @@ func runDelete(args []string, stdout io.Writer) error {
 	req.Header.Set("Authorization", "Bearer "+cfg.Token)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("delete failed: %w", err)
+		return commandError("server_unavailable", fmt.Errorf("delete failed: %w", err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusNoContent {
@@ -107,7 +137,7 @@ func currentRepositoryIdentity() (repositoryID, project string, err error) {
 	}
 	base, err := gitOutput(root, nil, "rev-parse", "HEAD")
 	if err != nil {
-		return "", "", errors.New("the repository needs at least one commit")
+		return "", "", commandError("repository_has_no_commits", errors.New("the repository needs at least one commit"))
 	}
 	repositoryID, project, _ = repositoryDetails(root, base)
 	return repositoryID, project, nil
@@ -134,7 +164,7 @@ func listHandoffs(cfg clientConfig, repositoryID string, limit int) ([]handoffMe
 	req.Header.Set("Authorization", "Bearer "+cfg.Token)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("list failed: %w", err)
+		return nil, commandError("server_unavailable", fmt.Errorf("list failed: %w", err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -162,7 +192,7 @@ func getHandoffMetadata(cfg clientConfig, id string) (handoffMetadata, error) {
 	req.Header.Set("Authorization", "Bearer "+cfg.Token)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return handoffMetadata{}, fmt.Errorf("inspect failed: %w", err)
+		return handoffMetadata{}, commandError("server_unavailable", fmt.Errorf("inspect failed: %w", err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {

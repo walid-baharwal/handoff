@@ -9,7 +9,9 @@ import (
 
 func main() {
 	if err := handoffapp.Run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr); err != nil {
-		fmt.Fprintln(os.Stderr, "handoff:", err)
+		if !handoffapp.IsReportedError(err) {
+			fmt.Fprintln(os.Stderr, "handoff:", err)
+		}
 		os.Exit(1)
 	}
 }

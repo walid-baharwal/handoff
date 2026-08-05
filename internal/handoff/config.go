@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -24,15 +23,21 @@ type clientConfig struct {
 }
 
 func runSetup(args []string, stdin io.Reader, stdout io.Writer) error {
-	fs := flag.NewFlagSet("setup", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
+	fs := newSilentFlagSet("setup")
 	server := fs.String("server", "", "Handoff server URL")
 	tokenFlag := fs.String("token", "", "team token (prefer the hidden prompt)")
+	tokenStdin := fs.Bool("token-stdin", false, "read the team token from standard input without prompting")
 	if err := fs.Parse(args); err != nil {
-		return err
+		return invalidArguments(err.Error())
+	}
+	if len(fs.Args()) != 0 {
+		return invalidArguments("usage: handoff setup --server URL [--token-stdin]")
 	}
 	if *server == "" {
-		return errors.New("--server is required")
+		return invalidArguments("--server is required")
+	}
+	if *tokenStdin && strings.TrimSpace(*tokenFlag) != "" {
+		return invalidArguments("--token and --token-stdin cannot be used together")
 	}
 
 	normalized, err := normalizeServerURL(*server)
@@ -40,10 +45,16 @@ func runSetup(args []string, stdin io.Reader, stdout io.Writer) error {
 		return err
 	}
 	tokenValue := strings.TrimSpace(*tokenFlag)
-	if tokenValue == "" {
+	if *tokenStdin {
+		line, readErr := bufio.NewReader(stdin).ReadString('\n')
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			return readErr
+		}
+		tokenValue = strings.TrimSpace(line)
+	} else if tokenValue == "" {
 		tokenValue = strings.TrimSpace(os.Getenv("HANDOFF_TOKEN"))
 	}
-	if tokenValue == "" {
+	if tokenValue == "" && !*tokenStdin {
 		fmt.Fprint(stdout, "Team token: ")
 		if file, ok := stdin.(*os.File); ok && term.IsTerminal(int(file.Fd())) {
 			secret, readErr := term.ReadPassword(int(file.Fd()))
@@ -109,13 +120,13 @@ func loadConfig() (clientConfig, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return clientConfig{}, errors.New("not configured; run 'handoff setup --server URL'")
+			return clientConfig{}, commandError("not_configured", errors.New("not configured; run 'handoff setup --server URL'"))
 		}
 		return clientConfig{}, err
 	}
 	var cfg clientConfig
 	if err := json.Unmarshal(data, &cfg); err != nil {
-		return clientConfig{}, fmt.Errorf("invalid config: %w", err)
+		return clientConfig{}, commandError("invalid_config", fmt.Errorf("invalid config: %w", err))
 	}
 	if env := strings.TrimSpace(os.Getenv("HANDOFF_SERVER")); env != "" {
 		cfg.Server = strings.TrimRight(env, "/")
@@ -124,14 +135,14 @@ func loadConfig() (clientConfig, error) {
 		cfg.Token = env
 	}
 	if cfg.Server == "" || cfg.Token == "" {
-		return clientConfig{}, errors.New("config is missing server or token")
+		return clientConfig{}, commandError("invalid_config", errors.New("config is missing server or token"))
 	}
 	normalized, err := normalizeServerURL(cfg.Server)
 	if err != nil {
-		return clientConfig{}, fmt.Errorf("invalid configured server: %w", err)
+		return clientConfig{}, commandError("invalid_config", fmt.Errorf("invalid configured server: %w", err))
 	}
 	if len(strings.TrimSpace(cfg.Token)) < 32 {
-		return clientConfig{}, errors.New("configured team token must contain at least 32 characters")
+		return clientConfig{}, commandError("invalid_config", errors.New("configured team token must contain at least 32 characters"))
 	}
 	cfg.Server = normalized
 	cfg.Token = strings.TrimSpace(cfg.Token)
