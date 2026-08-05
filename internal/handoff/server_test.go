@@ -19,7 +19,7 @@ func TestServerUploadDownloadAndCleanup(t *testing.T) {
 		Token:       strings.Repeat("t", 32),
 		DataDir:     dataDir,
 		DownloadDir: t.TempDir(),
-		MaxBytes:    8,
+		MaxBytes:    4096,
 		Retention:   time.Hour,
 	})
 	if err != nil {
@@ -34,7 +34,14 @@ func TestServerUploadDownloadAndCleanup(t *testing.T) {
 	}
 	response.Body.Close()
 
-	response = request(t, http.MethodPost, server.URL+"/api/v1/handoffs", strings.Repeat("t", 32), []byte("code"))
+	packageSource := filepath.Join(t.TempDir(), "source.handoff")
+	repositoryID := strings.Repeat("a", 32)
+	writeTestPackage(t, packageSource, repositoryID)
+	packageBytes, err := os.ReadFile(packageSource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response = request(t, http.MethodPost, server.URL+"/api/v1/handoffs", strings.Repeat("t", 32), packageBytes)
 	if response.StatusCode != http.StatusCreated {
 		t.Fatalf("upload status = %d: %s", response.StatusCode, readBody(response.Body))
 	}
@@ -50,11 +57,53 @@ func TestServerUploadDownloadAndCleanup(t *testing.T) {
 	}
 
 	response = request(t, http.MethodGet, server.URL+"/api/v1/handoffs/"+uploaded.ID, strings.Repeat("t", 32), nil)
-	if response.StatusCode != http.StatusOK || readBody(response.Body) != "code" {
+	if response.StatusCode != http.StatusOK || !bytes.Equal([]byte(readBody(response.Body)), packageBytes) {
 		t.Fatal("download did not return the uploaded bytes")
 	}
 
-	response = request(t, http.MethodPost, server.URL+"/api/v1/handoffs", strings.Repeat("t", 32), []byte("too large"))
+	response = request(t, http.MethodGet, server.URL+"/api/v1/handoffs?repository_id="+repositoryID, strings.Repeat("t", 32), nil)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("list status = %d: %s", response.StatusCode, readBody(response.Body))
+	}
+	var listed handoffListResponse
+	if err := json.NewDecoder(response.Body).Decode(&listed); err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if len(listed.Handoffs) != 1 || listed.Handoffs[0].ID != uploaded.ID || listed.Handoffs[0].Author != "Walid" {
+		t.Fatalf("unexpected inbox response: %+v", listed)
+	}
+	if len(listed.Handoffs[0].Files) != 0 {
+		t.Fatal("list response should not include changed paths")
+	}
+
+	response = request(t, http.MethodGet, server.URL+"/api/v1/handoffs?repository_id="+strings.Repeat("b", 32), strings.Repeat("t", 32), nil)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("filtered list status = %d: %s", response.StatusCode, readBody(response.Body))
+	}
+	listed = handoffListResponse{}
+	if err := json.NewDecoder(response.Body).Decode(&listed); err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if len(listed.Handoffs) != 0 {
+		t.Fatalf("repository filter returned unrelated handoffs: %+v", listed)
+	}
+
+	response = request(t, http.MethodGet, server.URL+"/api/v1/handoffs/"+uploaded.ID+"/metadata", strings.Repeat("t", 32), nil)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("metadata status = %d: %s", response.StatusCode, readBody(response.Body))
+	}
+	var metadata handoffMetadata
+	if err := json.NewDecoder(response.Body).Decode(&metadata); err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if metadata.Project != "handoff" || metadata.FileCount != 2 || metadata.PackageBytes != int64(len(packageBytes)) {
+		t.Fatalf("unexpected metadata: %+v", metadata)
+	}
+
+	response = request(t, http.MethodPost, server.URL+"/api/v1/handoffs", strings.Repeat("t", 32), make([]byte, 4097))
 	if response.StatusCode != http.StatusRequestEntityTooLarge {
 		t.Fatalf("oversized upload status = %d", response.StatusCode)
 	}
@@ -68,6 +117,71 @@ func TestServerUploadDownloadAndCleanup(t *testing.T) {
 	service.cleanupExpired()
 	if _, err := os.Stat(packagePath); !os.IsNotExist(err) {
 		t.Fatal("expired package was not removed")
+	}
+	if _, err := os.Stat(service.metadataPath(uploaded.ID)); !os.IsNotExist(err) {
+		t.Fatal("expired package metadata was not removed")
+	}
+}
+
+func TestServerDeleteRemovesPackageAndMetadata(t *testing.T) {
+	token := strings.Repeat("d", 32)
+	dataDir := t.TempDir()
+	service, err := newService(serviceConfig{
+		Token:       token,
+		DataDir:     dataDir,
+		DownloadDir: t.TempDir(),
+		MaxBytes:    defaultMaxBytes,
+		Retention:   time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(service.routes())
+	defer server.Close()
+	packageSource := filepath.Join(t.TempDir(), "source.handoff")
+	writeTestPackage(t, packageSource, strings.Repeat("d", 32))
+	packageBytes, err := os.ReadFile(packageSource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := request(t, http.MethodPost, server.URL+"/api/v1/handoffs", token, packageBytes)
+	if response.StatusCode != http.StatusCreated {
+		t.Fatalf("upload status = %d: %s", response.StatusCode, readBody(response.Body))
+	}
+	var uploaded handoffMetadata
+	if err := json.NewDecoder(response.Body).Decode(&uploaded); err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	response = request(t, http.MethodDelete, server.URL+"/api/v1/handoffs/"+uploaded.ID, token, nil)
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("delete status = %d: %s", response.StatusCode, readBody(response.Body))
+	}
+	response.Body.Close()
+	for _, path := range []string{filepath.Join(dataDir, uploaded.ID+".handoff"), service.metadataPath(uploaded.ID)} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("deleted handoff file remains at %s", path)
+		}
+	}
+}
+
+func TestServerRejectsInvalidPackage(t *testing.T) {
+	service, err := newService(serviceConfig{
+		Token:       strings.Repeat("t", 32),
+		DataDir:     t.TempDir(),
+		DownloadDir: t.TempDir(),
+		MaxBytes:    defaultMaxBytes,
+		Retention:   time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(service.routes())
+	defer server.Close()
+	response := request(t, http.MethodPost, server.URL+"/api/v1/handoffs", strings.Repeat("t", 32), []byte("not a package"))
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("invalid package status = %d", response.StatusCode)
 	}
 }
 

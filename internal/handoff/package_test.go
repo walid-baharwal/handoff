@@ -58,6 +58,26 @@ func TestManifestValidation(t *testing.T) {
 	}
 }
 
+func TestCreatePackageRejectsOversizedMetadata(t *testing.T) {
+	bundlePath := filepath.Join(t.TempDir(), "changes.bundle")
+	writeFile(t, bundlePath, "bundle")
+	files := make([]string, maxListedFiles)
+	for index := range files {
+		files[index] = strings.Repeat("x", 400) + string(rune('a'+index%26))
+	}
+	metadata := manifest{
+		BaseCommit: strings.Repeat("a", 40),
+		Commit:     strings.Repeat("b", 40),
+		Ref:        "refs/handoff/outgoing/abcd",
+		FileCount:  len(files),
+		Files:      files,
+	}
+	err := createPackage(filepath.Join(t.TempDir(), "large.handoff"), bundlePath, metadata)
+	if err == nil || !strings.Contains(err.Error(), "64 KiB") {
+		t.Fatalf("expected metadata size rejection, got %v", err)
+	}
+}
+
 type archiveEntry struct {
 	name string
 	data []byte
