@@ -1,6 +1,7 @@
 package handoff
 
 import (
+	"flag"
 	"fmt"
 	"io"
 )
@@ -15,25 +16,30 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		return nil
 	}
 
-	switch args[0] {
+	command := args[0]
+	commandArgs := args[1:]
+	var err error
+	switch command {
 	case "setup":
-		return runSetup(args[1:], stdin, stdout)
+		err = runSetup(commandArgs, stdin, stdout)
 	case "push":
-		return runPush(args[1:], stdin, stdout)
+		err = runPush(commandArgs, stdin, stdout)
 	case "pull":
-		return runPull(args[1:], stdin, stdout)
+		err = runPull(commandArgs, stdin, stdout)
 	case "list":
-		return runList(args[1:], stdout)
+		err = runList(commandArgs, stdout)
 	case "inspect":
-		return runInspect(args[1:], stdout)
+		err = runInspect(commandArgs, stdout)
 	case "delete":
-		return runDelete(args[1:], stdout)
+		err = runDelete(commandArgs, stdout)
 	case "continue":
-		return runContinue(args[1:], stdout)
+		err = runContinue(commandArgs, stdout)
 	case "abort":
-		return runAbort(args[1:], stdout)
+		err = runAbort(commandArgs, stdout)
+	case "status":
+		err = runStatus(commandArgs, stdout)
 	case "serve":
-		return runServe(args[1:], stdout, stderr)
+		err = runServe(commandArgs, stdout, stderr)
 	case "version", "--version", "-v":
 		fmt.Fprintln(stdout, Version)
 		return nil
@@ -43,17 +49,28 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	default:
 		return fmt.Errorf("unknown command %q (run 'handoff help')", args[0])
 	}
+	if err != nil && commandWantsJSON(command, commandArgs) {
+		return reportIntegrationError(stderr, command, err)
+	}
+	return err
+}
+
+func newSilentFlagSet(name string) *flag.FlagSet {
+	fs := flag.NewFlagSet(name, flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	return fs
 }
 
 func printUsage(w io.Writer) {
 	fmt.Fprintln(w, `Handoff transfers uncommitted Git changes through a central server.
 
 Usage:
-  handoff setup --server URL
-  handoff push [-m MESSAGE] [--dry-run] [--interactive] [--staged|--worktree] [--exclude PATH] [PATH ...]
+  handoff setup --server URL [--token-stdin]
+  handoff push [-m MESSAGE] [--dry-run] [--json] [--interactive] [--staged|--worktree] [--exclude PATH] [PATH ...]
   handoff list [--all] [--json]
-  handoff inspect ID
-  handoff pull [--dry-run] [--yes] [ID]
+  handoff inspect [--json] ID
+  handoff pull [--dry-run] [--yes] [--json] [ID]
+  handoff status [--json]
   handoff delete ID
   handoff continue ID
   handoff abort ID

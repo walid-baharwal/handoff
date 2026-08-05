@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { distTagForVersion, publishPackages } from "../scripts/publish-packages.mjs";
 import { mainPackageName, platforms } from "../scripts/packages.mjs";
 import { preparePackages, validateVersion } from "../scripts/prepare-packages.mjs";
+import { parsePackReport } from "../scripts/verify-packages.mjs";
 
 const npmDirectory = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -95,4 +96,12 @@ test("validates release versions and chooses safe npm dist-tags", () => {
   assert.throws(() => validateVersion("latest"), /invalid release version/);
   assert.equal(distTagForVersion("2.0.0"), "latest");
   assert.equal(distTagForVersion("2.0.0-rc.1"), "next");
+});
+
+test("accepts npm 11 and npm 12 pack reports", () => {
+  const packageName = "@walid-baharwal/handoff";
+  const report = { files: [{ path: "package.json" }] };
+  assert.deepEqual(parsePackReport(JSON.stringify([report]), packageName), report);
+  assert.deepEqual(parsePackReport(JSON.stringify({ [packageName]: report }), packageName), report);
+  assert.throws(() => parsePackReport("{}", packageName), /invalid report/);
 });

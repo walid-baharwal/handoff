@@ -5,6 +5,15 @@ import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { mainPackageName, packageDirectories, platforms } from "./packages.mjs";
 
+export function parsePackReport(output, packageName) {
+  const parsed = JSON.parse(output);
+  const report = Array.isArray(parsed) ? parsed[0] : parsed?.[packageName];
+  if (!report || !Array.isArray(report.files)) {
+    throw new Error(`npm pack returned an invalid report for ${packageName}`);
+  }
+  return report;
+}
+
 export async function verifyPackages(outputDirectory) {
   const directories = packageDirectories(outputDirectory);
   const manifests = await Promise.all(
@@ -28,7 +37,7 @@ export async function verifyPackages(outputDirectory) {
     if (packed.status !== 0) {
       throw new Error(`npm pack failed for ${manifests[index].name}: ${packed.stderr}`);
     }
-    const report = JSON.parse(packed.stdout)[0];
+    const report = parsePackReport(packed.stdout, manifests[index].name);
     const files = report.files.map((file) => file.path);
     assert.ok(files.includes("package.json"), `${manifests[index].name} is missing package.json`);
     assert.ok(files.includes("README.md"), `${manifests[index].name} is missing README.md`);

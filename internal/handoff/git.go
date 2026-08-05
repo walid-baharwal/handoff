@@ -61,16 +61,18 @@ func buildHandoffPackageFromPaths(root, packagePath, message string, paths []str
 	if err := ensureNoOperation(root); err != nil {
 		return manifest{}, err
 	}
-	if _, err := os.Stat(statePath(root)); !errors.Is(err, os.ErrNotExist) {
-		return manifest{}, errors.New("a Handoff operation is already active")
+	if _, err := os.Stat(statePath(root)); err == nil {
+		return manifest{}, commandError("recovery_active", errors.New("a Handoff operation is already active"))
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return manifest{}, err
 	}
 	message = strings.TrimSpace(message)
 	if len(message) > 500 {
-		return manifest{}, errors.New("message cannot exceed 500 characters")
+		return manifest{}, invalidArguments("message cannot exceed 500 characters")
 	}
 	base, err := gitOutput(root, nil, "rev-parse", "HEAD")
 	if err != nil {
-		return manifest{}, errors.New("the repository needs at least one commit before creating a handoff")
+		return manifest{}, commandError("repository_has_no_commits", errors.New("the repository needs at least one commit before creating a handoff"))
 	}
 	tmpDir, err := os.MkdirTemp("", "handoff-git-*")
 	if err != nil {
@@ -90,7 +92,7 @@ func buildHandoffPackageFromPaths(root, packagePath, message string, paths []str
 			return manifest{}, err
 		}
 		if strings.TrimSpace(patch) == "" {
-			return manifest{}, errors.New("there are no staged changes to hand off")
+			return manifest{}, commandError("no_changes", errors.New("there are no staged changes to hand off"))
 		}
 		if _, err := gitOutputRaw(root, gitEnv, strings.NewReader(patch), "apply", "--cached", "--binary", "--whitespace=nowarn"); err != nil {
 			return manifest{}, fmt.Errorf("prepare staged changes: %w", err)
@@ -111,7 +113,7 @@ func buildHandoffPackageFromPaths(root, packagePath, message string, paths []str
 		return manifest{}, err
 	}
 	if tree == baseTree {
-		return manifest{}, errors.New("there are no changes to hand off")
+		return manifest{}, commandError("no_changes", errors.New("there are no changes to hand off"))
 	}
 	changedOutput, err := gitOutputRaw(root, gitEnv, nil, "diff", "--cached", "--name-only", "-z", "HEAD")
 	if err != nil {
@@ -211,11 +213,11 @@ func selectHandoffPaths(root string, paths, excludes []string, mode pushMode) ([
 	if len(selected) == 0 {
 		switch mode {
 		case pushModeStaged:
-			return nil, errors.New("there are no staged changes matching the selected paths")
+			return nil, commandError("no_changes", errors.New("there are no staged changes matching the selected paths"))
 		case pushModeWorktree:
-			return nil, errors.New("there are no worktree changes matching the selected paths")
+			return nil, commandError("no_changes", errors.New("there are no worktree changes matching the selected paths"))
 		default:
-			return nil, errors.New("there are no changes matching the selected paths")
+			return nil, commandError("no_changes", errors.New("there are no changes matching the selected paths"))
 		}
 	}
 	return selected, nil
@@ -275,8 +277,10 @@ func applyHandoffPackage(id, packagePath, tmpDir string, stdout io.Writer) error
 		return err
 	}
 	stateFile := statePath(root)
-	if _, err := os.Stat(stateFile); !errors.Is(err, os.ErrNotExist) {
-		return errors.New("a Handoff operation is already active; use 'handoff continue ID' or 'handoff abort ID'")
+	if _, err := os.Stat(stateFile); err == nil {
+		return commandError("recovery_active", errors.New("a Handoff operation is already active; use 'handoff continue ID' or 'handoff abort ID'"))
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
 	}
 	metadata, bundlePath, err := extractPackage(packagePath, tmpDir, defaultMaxBytes)
 	if err != nil {
@@ -384,10 +388,10 @@ func continueHandoff(id string, stdout io.Writer) error {
 		return err
 	}
 	if state.ID != id {
-		return fmt.Errorf("active handoff is %s, not %s", state.ID, id)
+		return commandError("active_handoff_mismatch", fmt.Errorf("active handoff is %s, not %s", state.ID, id))
 	}
 	if hasUnmerged(root) {
-		return errors.New("conflicts remain; resolve them and run 'git add' on each file before continuing")
+		return commandError("conflicts_unresolved", errors.New("conflicts remain; resolve them and run 'git add' on each file before continuing"))
 	}
 	switch state.Phase {
 	case phaseIncoming:
@@ -428,7 +432,7 @@ func abortHandoff(id string, stdout io.Writer) error {
 		return err
 	}
 	if state.ID != id {
-		return fmt.Errorf("active handoff is %s, not %s", state.ID, id)
+		return commandError("active_handoff_mismatch", fmt.Errorf("active handoff is %s, not %s", state.ID, id))
 	}
 	if err := restoreOriginal(root, state, stateFile); err != nil {
 		return err
@@ -532,13 +536,13 @@ func backupRef(id string) string {
 }
 
 func conflictError(id, stage string) error {
-	return fmt.Errorf("conflict while applying %s; resolve files, run 'git add', then 'handoff continue %s' (or 'handoff abort %s')", stage, id, id)
+	return commandError("conflict", fmt.Errorf("conflict while applying %s; resolve files, run 'git add', then 'handoff continue %s' (or 'handoff abort %s')", stage, id, id))
 }
 
 func repositoryRoot() (string, error) {
 	output, err := gitOutput("", nil, "rev-parse", "--show-toplevel")
 	if err != nil {
-		return "", errors.New("current directory is not inside a Git repository")
+		return "", commandError("repository_required", errors.New("current directory is not inside a Git repository"))
 	}
 	return output, nil
 }
@@ -559,7 +563,7 @@ func loadState(path string) (handoffState, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return handoffState{}, errors.New("no Handoff operation is active")
+			return handoffState{}, commandError("no_active_recovery", errors.New("no Handoff operation is active"))
 		}
 		return handoffState{}, err
 	}
@@ -576,13 +580,13 @@ func removeState(path string) {
 
 func ensureNoOperation(root string) error {
 	if hasUnmerged(root) {
-		return errors.New("repository has unresolved conflicts")
+		return commandError("repository_conflict", errors.New("repository has unresolved conflicts"))
 	}
 	for _, name := range []string{"MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply"} {
 		path, err := gitOutput(root, nil, "rev-parse", "--path-format=absolute", "--git-path", name)
 		if err == nil {
 			if _, statErr := os.Stat(path); statErr == nil {
-				return fmt.Errorf("repository has an active Git operation (%s)", name)
+				return commandError("git_operation_active", fmt.Errorf("repository has an active Git operation (%s)", name))
 			}
 		}
 	}
