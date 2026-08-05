@@ -28,8 +28,6 @@ jobs:
         run: |
           go test ./...
           npm test --prefix npm
-      - name: Prepare release tools
-        run: npm install --global npm@latest
       - name: Validate version
         env:
           VERSION: ${{ github.ref_name }}
