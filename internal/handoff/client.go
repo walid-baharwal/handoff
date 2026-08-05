@@ -1,6 +1,7 @@
 package handoff
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -40,10 +42,19 @@ func runPush(args []string, stdout io.Writer) error {
 		return err
 	}
 	fmt.Fprintf(stdout, "Handoff uploaded successfully\nID: %s\n", id)
-	if metadata.Message != "" {
-		fmt.Fprintf(stdout, "Message: %s\n", metadata.Message)
+	if metadata.Author != "" {
+		fmt.Fprintf(stdout, "From: %s (self-reported)\n", printable(metadata.Author))
 	}
-	fmt.Fprintf(stdout, "\nShare this command:\nhandoff pull %s\n", id)
+	if metadata.Project != "" {
+		fmt.Fprintf(stdout, "Project: %s\n", printable(metadata.Project))
+	}
+	if metadata.Branch != "" {
+		fmt.Fprintf(stdout, "Branch: %s\n", printable(metadata.Branch))
+	}
+	if metadata.Message != "" {
+		fmt.Fprintf(stdout, "Message: %s\n", printable(metadata.Message))
+	}
+	fmt.Fprintf(stdout, "Files: %d\n\nThis handoff is now visible in the team inbox.\nDirect command:\nhandoff pull %s\n", metadata.FileCount, id)
 	return nil
 }
 
@@ -86,14 +97,75 @@ func uploadPackage(cfg clientConfig, path string) (string, error) {
 	return result.ID, nil
 }
 
-func runPull(args []string, stdout io.Writer) error {
-	if len(args) != 1 || !idPattern.MatchString(strings.ToLower(args[0])) {
-		return errors.New("usage: handoff pull ID")
+func runPull(args []string, stdin io.Reader, stdout io.Writer) error {
+	fs := flag.NewFlagSet("pull", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	dryRun := fs.Bool("dry-run", false, "inspect without applying")
+	yes := fs.Bool("yes", false, "skip interactive confirmation")
+	if err := fs.Parse(args); err != nil {
+		return err
 	}
-	id := strings.ToLower(args[0])
+	if len(fs.Args()) > 1 {
+		return errors.New("usage: handoff pull [--dry-run] [--yes] [ID]")
+	}
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
+	}
+	id := ""
+	input := bufio.NewReader(stdin)
+	interactive := len(fs.Args()) == 0
+	var selected handoffMetadata
+	if interactive {
+		repositoryID, project, err := currentRepositoryIdentity()
+		if err != nil {
+			return err
+		}
+		items, err := listHandoffs(cfg, repositoryID, 20)
+		if err != nil {
+			return err
+		}
+		if len(items) == 0 {
+			fmt.Fprintf(stdout, "No handoffs are available for %s.\n", printable(project))
+			return nil
+		}
+		printHandoffList(stdout, items, project)
+		selected, err = selectHandoff(input, stdout, items)
+		if err != nil {
+			return err
+		}
+		id = selected.ID
+		selected, err = getHandoffMetadata(cfg, id)
+		if err != nil {
+			return err
+		}
+	} else {
+		id = strings.ToLower(fs.Args()[0])
+		if !idPattern.MatchString(id) {
+			return errors.New("usage: handoff pull [--dry-run] [--yes] [ID]")
+		}
+		selected, _ = getHandoffMetadata(cfg, id)
+	}
+	if selected.ID != "" {
+		fmt.Fprintln(stdout)
+		printHandoffMetadata(stdout, selected)
+	}
+	if *dryRun {
+		if selected.ID == "" {
+			return errors.New("handoff metadata is unavailable; the server may predate inbox support")
+		}
+		fmt.Fprintln(stdout, "\nDry run complete; no files were changed.")
+		return nil
+	}
+	if interactive && !*yes {
+		confirmed, err := confirmPull(input, stdout)
+		if err != nil {
+			return err
+		}
+		if !confirmed {
+			fmt.Fprintln(stdout, "Pull cancelled.")
+			return nil
+		}
 	}
 	tmpDir, err := os.MkdirTemp("", "handoff-pull-*")
 	if err != nil {
@@ -105,6 +177,56 @@ func runPull(args []string, stdout io.Writer) error {
 		return err
 	}
 	return applyHandoffPackage(id, packagePath, tmpDir, stdout)
+}
+
+func selectHandoff(stdin *bufio.Reader, stdout io.Writer, items []handoffMetadata) (handoffMetadata, error) {
+	fmt.Fprintf(stdout, "\nSelect a handoff [1-%d] or enter its ID: ", len(items))
+	line, err := readInputLine(stdin)
+	if err != nil {
+		return handoffMetadata{}, err
+	}
+	if number, parseErr := strconv.Atoi(line); parseErr == nil {
+		if number < 1 || number > len(items) {
+			return handoffMetadata{}, errors.New("selection is outside the displayed range")
+		}
+		return items[number-1], nil
+	}
+	id := strings.ToLower(line)
+	if !idPattern.MatchString(id) {
+		return handoffMetadata{}, errors.New("enter a displayed number or a valid handoff ID")
+	}
+	for _, item := range items {
+		if item.ID == id {
+			return item, nil
+		}
+	}
+	return handoffMetadata{}, errors.New("handoff ID is not in the displayed inbox")
+}
+
+func confirmPull(stdin *bufio.Reader, stdout io.Writer) (bool, error) {
+	fmt.Fprint(stdout, "\nApply this handoff? [y/N]: ")
+	line, err := readInputLine(stdin)
+	if err != nil {
+		return false, err
+	}
+	switch strings.ToLower(line) {
+	case "y", "yes":
+		return true, nil
+	default:
+		return false, nil
+	}
+}
+
+func readInputLine(stdin *bufio.Reader) (string, error) {
+	line, err := stdin.ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return "", err
+	}
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return "", errors.New("no selection was entered")
+	}
+	return line, nil
 }
 
 func downloadPackage(cfg clientConfig, id, destination string) error {

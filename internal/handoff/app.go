@@ -21,7 +21,13 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	case "push":
 		return runPush(args[1:], stdout)
 	case "pull":
-		return runPull(args[1:], stdout)
+		return runPull(args[1:], stdin, stdout)
+	case "list":
+		return runList(args[1:], stdout)
+	case "inspect":
+		return runInspect(args[1:], stdout)
+	case "delete":
+		return runDelete(args[1:], stdout)
 	case "continue":
 		return runContinue(args[1:], stdout)
 	case "abort":
@@ -45,7 +51,10 @@ func printUsage(w io.Writer) {
 Usage:
   handoff setup --server URL
   handoff push [-m MESSAGE] [PATH ...]
-  handoff pull ID
+  handoff list [--all] [--json]
+  handoff inspect ID
+  handoff pull [--dry-run] [--yes] [ID]
+  handoff delete ID
   handoff continue ID
   handoff abort ID
   handoff serve

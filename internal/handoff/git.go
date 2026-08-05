@@ -95,6 +95,13 @@ func buildHandoffPackage(packagePath, message string, paths []string) (manifest,
 	}
 
 	name, email := gitIdentity(root)
+	repositoryID, project, branch := repositoryDetails(root, base)
+	listedFiles := changed
+	filesTruncated := false
+	if len(listedFiles) > maxListedFiles {
+		listedFiles = listedFiles[:maxListedFiles]
+		filesTruncated = true
+	}
 	commitMessage := message
 	if commitMessage == "" {
 		commitMessage = "Handoff changes"
@@ -124,12 +131,18 @@ func buildHandoffPackage(packagePath, message string, paths []string) (manifest,
 		return manifest{}, err
 	}
 	metadata := manifest{
-		BaseCommit: base,
-		Commit:     commit,
-		Ref:        ref,
-		CreatedAt:  time.Now().UTC(),
-		Message:    message,
-		Author:     name,
+		BaseCommit:     base,
+		Commit:         commit,
+		Ref:            ref,
+		CreatedAt:      time.Now().UTC(),
+		Message:        message,
+		Author:         name,
+		Project:        project,
+		RepositoryID:   repositoryID,
+		Branch:         branch,
+		FileCount:      len(changed),
+		Files:          append([]string(nil), listedFiles...),
+		FilesTruncated: filesTruncated,
 	}
 	if err := createPackage(packagePath, bundlePath, metadata); err != nil {
 		return manifest{}, err

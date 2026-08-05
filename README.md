@@ -13,6 +13,7 @@ handoff push  ── package ──> stores package ── ID ──────
 ## Features
 
 - One command to upload changes and one command to apply them.
+- Repository-scoped team inbox with sender, branch, message, and file summary.
 - Transfers tracked, untracked, deleted, staged, and unstaged files.
 - Sends all changes or only selected paths.
 - Uses Git's three-way merge and reports normal Git conflicts.
@@ -102,10 +103,37 @@ Upload only selected files or directories:
 handoff push -m "backend only" backend/api.go backend/models/
 ```
 
-The command prints a random ID. Apply it from another clone of the same repository:
+The command prints a random ID and adds the handoff to the repository's team inbox. From another clone of the same repository, list available handoffs:
+
+```bash
+handoff list
+```
+
+Inspect one without changing local files:
+
+```bash
+handoff inspect abcdef123456
+```
+
+Run `pull` without an ID to select from the inbox interactively:
+
+```bash
+handoff pull
+```
+
+The receiver sees the sender's Git-configured name, branch, message, changed paths, creation time, and expiry before confirming. Until per-user server tokens are introduced, the displayed sender identity is self-reported.
+
+An ID can still be applied directly:
 
 ```bash
 handoff pull abcdef123456
+```
+
+Preview metadata without applying the handoff, or remove a handoff from the inbox:
+
+```bash
+handoff pull --dry-run abcdef123456
+handoff delete abcdef123456
 ```
 
 If Git reports conflicts, edit the files and then continue:

@@ -126,6 +126,15 @@ func loadConfig() (clientConfig, error) {
 	if cfg.Server == "" || cfg.Token == "" {
 		return clientConfig{}, errors.New("config is missing server or token")
 	}
+	normalized, err := normalizeServerURL(cfg.Server)
+	if err != nil {
+		return clientConfig{}, fmt.Errorf("invalid configured server: %w", err)
+	}
+	if len(strings.TrimSpace(cfg.Token)) < 32 {
+		return clientConfig{}, errors.New("configured team token must contain at least 32 characters")
+	}
+	cfg.Server = normalized
+	cfg.Token = strings.TrimSpace(cfg.Token)
 	return cfg, nil
 }
 
