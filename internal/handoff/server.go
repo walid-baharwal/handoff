@@ -13,6 +13,8 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -69,8 +71,11 @@ func (s *service) routes() http.Handler {
 	mux.Handle("GET /api/v1/auth", s.auth(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	})))
+	mux.Handle("GET /api/v1/handoffs", s.auth(http.HandlerFunc(s.handleList)))
 	mux.Handle("POST /api/v1/handoffs", s.auth(http.HandlerFunc(s.handleUpload)))
+	mux.Handle("GET /api/v1/handoffs/{id}/metadata", s.auth(http.HandlerFunc(s.handleMetadata)))
 	mux.Handle("GET /api/v1/handoffs/{id}", s.auth(http.HandlerFunc(s.handleDownload)))
+	mux.Handle("DELETE /api/v1/handoffs/{id}", s.auth(http.HandlerFunc(s.handleDelete)))
 	return s.securityHeaders(mux)
 }
 
@@ -142,40 +147,202 @@ func (s *service) handleUpload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "empty or incomplete upload", http.StatusBadRequest)
 		return
 	}
+	verifyDir, err := os.MkdirTemp("", "handoff-upload-verify-*")
+	if err != nil {
+		http.Error(w, "cannot validate upload", http.StatusInternalServerError)
+		return
+	}
+	defer os.RemoveAll(verifyDir)
+	packageManifest, _, err := extractPackage(tmpName, verifyDir, s.maxBytes)
+	if err != nil {
+		http.Error(w, "invalid handoff package", http.StatusBadRequest)
+		return
+	}
 
-	id, finalPath, err := s.availableID()
+	id, finalPath, reservationPath, err := s.reserveID()
 	if err != nil {
 		http.Error(w, "cannot allocate handoff ID", http.StatusInternalServerError)
 		return
 	}
+	defer os.Remove(reservationPath)
 	if err := os.Rename(tmpName, finalPath); err != nil {
 		http.Error(w, "cannot finalize upload", http.StatusInternalServerError)
+		return
+	}
+	storedAt := time.Now().UTC()
+	record := metadataFromManifest(id, packageManifest, storedAt, storedAt.Add(s.retention), written)
+	if err := writeJSONAtomic(s.metadataPath(id), record, 0o600); err != nil {
+		_ = os.Remove(finalPath)
+		http.Error(w, "cannot index upload", http.StatusInternalServerError)
 		return
 	}
 	s.logger.Printf("uploaded id=%s bytes=%d", id, written)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	_ = json.NewEncoder(w).Encode(map[string]string{"id": id})
+	_ = json.NewEncoder(w).Encode(record)
 }
 
-func (s *service) availableID() (string, string, error) {
+func (s *service) reserveID() (string, string, string, error) {
 	for range 20 {
 		data := make([]byte, 6)
 		if _, err := rand.Read(data); err != nil {
-			return "", "", err
+			return "", "", "", err
 		}
 		id := hex.EncodeToString(data)
-		path := filepath.Join(s.dataDir, id+".handoff")
-		if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
-			return id, path, nil
+		finalPath := filepath.Join(s.dataDir, id+".handoff")
+		reservationPath := filepath.Join(s.dataDir, "."+id+".reserve")
+		reservation, err := os.OpenFile(reservationPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		if errors.Is(err, os.ErrExist) {
+			continue
 		}
+		if err != nil {
+			return "", "", "", err
+		}
+		if closeErr := reservation.Close(); closeErr != nil {
+			_ = os.Remove(reservationPath)
+			return "", "", "", closeErr
+		}
+		if _, err := os.Stat(finalPath); err == nil || !errors.Is(err, os.ErrNotExist) {
+			_ = os.Remove(reservationPath)
+			continue
+		}
+		return id, finalPath, reservationPath, nil
 	}
-	return "", "", errors.New("ID collision limit reached")
+	return "", "", "", errors.New("ID collision limit reached")
+}
+
+func (s *service) metadataPath(id string) string {
+	return filepath.Join(s.dataDir, id+".json")
+}
+
+func (s *service) handleList(w http.ResponseWriter, r *http.Request) {
+	repositoryID := strings.TrimSpace(r.URL.Query().Get("repository_id"))
+	if repositoryID != "" && !repositoryIDPattern.MatchString(repositoryID) {
+		http.Error(w, "invalid repository ID", http.StatusBadRequest)
+		return
+	}
+	limit := 20
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 || parsed > 100 {
+			http.Error(w, "limit must be between 1 and 100", http.StatusBadRequest)
+			return
+		}
+		limit = parsed
+	}
+	entries, err := os.ReadDir(s.dataDir)
+	if err != nil {
+		http.Error(w, "cannot list handoffs", http.StatusInternalServerError)
+		return
+	}
+	now := time.Now()
+	items := make([]handoffMetadata, 0)
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		id := strings.TrimSuffix(name, ".json")
+		if !idPattern.MatchString(id) {
+			continue
+		}
+		record, err := s.loadMetadata(id)
+		if err != nil || (!record.ExpiresAt.IsZero() && !record.ExpiresAt.After(now)) {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(s.dataDir, id+".handoff")); err != nil {
+			continue
+		}
+		if repositoryID != "" && record.RepositoryID != repositoryID {
+			continue
+		}
+		record.Files = nil
+		items = append(items, record)
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].StoredAt.Equal(items[j].StoredAt) {
+			return items[i].ID > items[j].ID
+		}
+		return items[i].StoredAt.After(items[j].StoredAt)
+	})
+	if len(items) > limit {
+		items = items[:limit]
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(handoffListResponse{Handoffs: items})
+}
+
+func (s *service) handleMetadata(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if !idPattern.MatchString(id) {
+		http.NotFound(w, r)
+		return
+	}
+	record, err := s.loadMetadata(id)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			http.NotFound(w, r)
+			return
+		}
+		http.Error(w, "cannot read handoff metadata", http.StatusInternalServerError)
+		return
+	}
+	if (!record.ExpiresAt.IsZero() && !record.ExpiresAt.After(time.Now())) || !regularFileExists(filepath.Join(s.dataDir, id+".handoff")) {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "private, no-store")
+	_ = json.NewEncoder(w).Encode(record)
+}
+
+func regularFileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.Mode().IsRegular()
+}
+
+func (s *service) loadMetadata(id string) (handoffMetadata, error) {
+	data, err := os.ReadFile(s.metadataPath(id))
+	if err != nil {
+		return handoffMetadata{}, err
+	}
+	var record handoffMetadata
+	if err := json.Unmarshal(data, &record); err != nil {
+		return handoffMetadata{}, err
+	}
+	if record.ID != id {
+		return handoffMetadata{}, errors.New("handoff metadata ID mismatch")
+	}
+	return record, nil
+}
+
+func (s *service) handleDelete(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if !idPattern.MatchString(id) {
+		http.NotFound(w, r)
+		return
+	}
+	packagePath := filepath.Join(s.dataDir, id+".handoff")
+	if err := os.Remove(packagePath); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			http.NotFound(w, r)
+			return
+		}
+		http.Error(w, "cannot delete handoff", http.StatusInternalServerError)
+		return
+	}
+	_ = os.Remove(s.metadataPath(id))
+	s.logger.Printf("deleted id=%s", id)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *service) handleDownload(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if !idPattern.MatchString(id) {
+		http.NotFound(w, r)
+		return
+	}
+	if record, err := s.loadMetadata(id); err == nil && !record.ExpiresAt.IsZero() && !record.ExpiresAt.After(time.Now()) {
 		http.NotFound(w, r)
 		return
 	}
@@ -247,6 +414,7 @@ func (s *service) cleanupExpired() {
 			continue
 		}
 		if err := os.Remove(filepath.Join(s.dataDir, entry.Name())); err == nil {
+			_ = os.Remove(s.metadataPath(strings.TrimSuffix(entry.Name(), ".handoff")))
 			s.logger.Printf("expired id=%s", strings.TrimSuffix(entry.Name(), ".handoff"))
 		}
 	}

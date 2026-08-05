@@ -23,7 +23,7 @@ func TestRunHelpVersionAndUnknownCommand(t *testing.T) {
 	if err := Run(nil, strings.NewReader(""), &output, &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(output.String(), "handoff pull ID") {
+	if !strings.Contains(output.String(), "handoff pull [--dry-run] [--yes] [ID]") {
 		t.Fatalf("usage output = %q", output.String())
 	}
 

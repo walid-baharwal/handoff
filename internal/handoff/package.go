@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"time"
 )
 
@@ -20,14 +21,21 @@ const packageVersion = 1
 var objectIDPattern = regexp.MustCompile(`^(?:[0-9a-f]{40}|[0-9a-f]{64})$`)
 
 type manifest struct {
-	Version      int       `json:"version"`
-	BaseCommit   string    `json:"base_commit"`
-	Commit       string    `json:"commit"`
-	Ref          string    `json:"ref"`
-	CreatedAt    time.Time `json:"created_at"`
-	Message      string    `json:"message,omitempty"`
-	Author       string    `json:"author,omitempty"`
-	BundleSHA256 string    `json:"bundle_sha256"`
+	Version        int       `json:"version"`
+	BaseCommit     string    `json:"base_commit"`
+	Commit         string    `json:"commit"`
+	Ref            string    `json:"ref"`
+	CreatedAt      time.Time `json:"created_at"`
+	Message        string    `json:"message,omitempty"`
+	Author         string    `json:"author,omitempty"`
+	AuthorEmail    string    `json:"author_email,omitempty"`
+	Project        string    `json:"project,omitempty"`
+	RepositoryID   string    `json:"repository_id,omitempty"`
+	Branch         string    `json:"branch,omitempty"`
+	FileCount      int       `json:"file_count,omitempty"`
+	Files          []string  `json:"files,omitempty"`
+	FilesTruncated bool      `json:"files_truncated,omitempty"`
+	BundleSHA256   string    `json:"bundle_sha256"`
 }
 
 func createPackage(path, bundlePath string, metadata manifest) error {
@@ -52,6 +60,9 @@ func createPackage(path, bundlePath string, metadata manifest) error {
 	manifestBytes, err := json.Marshal(metadata)
 	if err != nil {
 		return err
+	}
+	if len(manifestBytes) > 64<<10 {
+		return errors.New("handoff metadata exceeds the 64 KiB limit")
 	}
 
 	output, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
@@ -186,6 +197,20 @@ func validateManifest(value manifest) error {
 	}
 	if len(value.Message) > 500 || len(value.Author) > 200 {
 		return errors.New("handoff metadata is too long")
+	}
+	if len(value.AuthorEmail) > 320 || len(value.Project) > 200 || len(value.Branch) > 500 {
+		return errors.New("handoff metadata is too long")
+	}
+	if value.RepositoryID != "" && !repositoryIDPattern.MatchString(value.RepositoryID) {
+		return errors.New("invalid repository ID in handoff manifest")
+	}
+	if value.FileCount < 0 || len(value.Files) > maxListedFiles || value.FileCount < len(value.Files) {
+		return errors.New("invalid file summary in handoff manifest")
+	}
+	for _, path := range value.Files {
+		if path == "" || len(path) > 4096 || strings.ContainsRune(path, 0) {
+			return errors.New("invalid file path in handoff manifest")
+		}
 	}
 	return nil
 }

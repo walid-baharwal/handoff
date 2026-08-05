@@ -1,8 +1,10 @@
 package handoff
 
 import (
+	"bytes"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -27,7 +29,12 @@ func TestClientServerRoundTrip(t *testing.T) {
 
 	source := filepath.Join(t.TempDir(), "source.handoff")
 	destination := filepath.Join(t.TempDir(), "downloaded.handoff")
-	writeFile(t, source, "exact package bytes")
+	repositoryID := strings.Repeat("a", 32)
+	writeTestPackage(t, source, repositoryID)
+	sourceBytes, err := os.ReadFile(source)
+	if err != nil {
+		t.Fatal(err)
+	}
 	cfg := clientConfig{Server: server.URL, Token: token}
 	id, err := uploadPackage(cfg, source)
 	if err != nil {
@@ -36,7 +43,27 @@ func TestClientServerRoundTrip(t *testing.T) {
 	if err := downloadPackage(cfg, id, destination); err != nil {
 		t.Fatal(err)
 	}
-	assertFile(t, destination, "exact package bytes")
+	destinationBytes, err := os.ReadFile(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(destinationBytes, sourceBytes) {
+		t.Fatal("downloaded package bytes differ from upload")
+	}
+	items, err := listHandoffs(cfg, repositoryID, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].ID != id {
+		t.Fatalf("unexpected inbox items: %+v", items)
+	}
+	metadata, err := getHandoffMetadata(cfg, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if metadata.Author != "Walid" || metadata.Message != "Inbox test" {
+		t.Fatalf("unexpected metadata: %+v", metadata)
+	}
 }
 
 func TestDownloadRejectsOversizedContentLength(t *testing.T) {
