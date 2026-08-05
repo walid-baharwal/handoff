@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html/template"
 	"io"
 	"log"
 	"mime"
@@ -20,6 +21,111 @@ import (
 )
 
 var idPattern = regexp.MustCompile(`^[0-9a-f]{12}$`)
+
+var homeTemplate = template.Must(template.New("home").Parse(`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Handoff · Share work in progress</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; color: #e8edf5; background: #0b0f14; }
+    a { color: inherit; }
+    .shell { width: min(920px, calc(100% - 32px)); margin: 0 auto; padding: 56px 0 32px; }
+    header { display: flex; align-items: center; justify-content: space-between; gap: 20px; margin-bottom: 56px; }
+    .brand { display: flex; align-items: center; gap: 11px; font-weight: 750; letter-spacing: -.02em; }
+    .mark { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 10px; color: #07110d; background: #67e8a5; font: 800 18px/1 ui-monospace, monospace; }
+    .version { color: #7f8b9d; font: 500 12px/1 ui-monospace, monospace; }
+    .status { display: flex; align-items: center; gap: 8px; color: #9aa7b8; font-size: 13px; }
+    .status::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: #67e8a5; box-shadow: 0 0 0 4px rgba(103,232,165,.1); }
+    .hero { max-width: 720px; }
+    h1 { margin: 0; max-width: 680px; font-size: clamp(40px, 7vw, 68px); line-height: 1.02; letter-spacing: -.055em; }
+    .lead { margin: 24px 0 0; max-width: 630px; color: #9aa7b8; font-size: 18px; line-height: 1.65; }
+    .panel { margin-top: 48px; padding: 26px; border: 1px solid #222a35; border-radius: 18px; background: #111720; box-shadow: 0 24px 70px rgba(0,0,0,.28); }
+    .panel h2 { margin: 0 0 20px; font-size: 15px; letter-spacing: .01em; }
+	.step { display: grid; grid-template-columns: 30px 1fr; gap: 14px; padding: 20px 0; border-top: 1px solid #222a35; }
+	.step > div { min-width: 0; }
+	.step:first-of-type { border-top: 0; padding-top: 0; }
+    .step:last-child { padding-bottom: 0; }
+    .number { display: grid; place-items: center; width: 26px; height: 26px; border: 1px solid #334052; border-radius: 50%; color: #aeb9c8; font: 600 12px/1 ui-monospace, monospace; }
+    .step-title { margin: 2px 0 10px; font-size: 14px; font-weight: 650; }
+    code { font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace; }
+    .command { display: block; overflow-x: auto; padding: 13px 15px; border: 1px solid #263142; border-radius: 10px; color: #d9e4f1; background: #0a0e13; font-size: 13px; line-height: 1.55; white-space: nowrap; }
+    .prompt { color: #67e8a5; user-select: none; }
+    .downloads { display: flex; flex-wrap: wrap; gap: 8px; }
+    .download { padding: 9px 12px; border: 1px solid #334052; border-radius: 9px; color: #cbd5e1; text-decoration: none; font-size: 12px; transition: border-color .15s, background .15s; }
+    .download:hover { border-color: #67e8a5; background: rgba(103,232,165,.06); }
+    footer { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 16px; margin-top: 24px; color: #727f91; font-size: 12px; }
+    footer a { text-underline-offset: 3px; }
+    @media (max-width: 600px) {
+      .shell { padding-top: 28px; }
+      header { margin-bottom: 44px; }
+      h1 { font-size: 42px; }
+		.lead { font-size: 16px; }
+		.panel { margin-top: 36px; padding: 20px; }
+		.command { white-space: normal; overflow-wrap: anywhere; }
+		.status span { display: none; }
+	}
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header>
+      <div class="brand"><span class="mark">H</span><span>Handoff</span><span class="version">{{.Version}}</span></div>
+      <div class="status"><span>Server ready</span></div>
+    </header>
+
+    <section class="hero">
+      <h1>Share work in progress.</h1>
+      <p class="lead">Send uncommitted Git changes to a teammate without temporary commits, ZIP files, or touching the main repository.</p>
+    </section>
+
+    <section class="panel" aria-labelledby="quick-start">
+      <h2 id="quick-start">Quick start</h2>
+      <div class="step">
+        <span class="number">1</span>
+        <div>
+          <p class="step-title">Download the CLI for your machine</p>
+          <div class="downloads">
+            <a class="download" href="/downloads/handoff-linux-amd64">Linux x64</a>
+            <a class="download" href="/downloads/handoff-linux-arm64">Linux ARM64</a>
+            <a class="download" href="/downloads/handoff-darwin-arm64">macOS Apple Silicon</a>
+            <a class="download" href="/downloads/handoff-darwin-amd64">macOS Intel</a>
+            <a class="download" href="/downloads/handoff-windows-amd64.exe">Windows x64</a>
+          </div>
+        </div>
+      </div>
+      <div class="step">
+        <span class="number">2</span>
+        <div>
+          <p class="step-title">Connect this Handoff server</p>
+          <code class="command"><span class="prompt">$</span> handoff setup --server {{.ServerURL}}</code>
+        </div>
+      </div>
+      <div class="step">
+        <span class="number">3</span>
+        <div>
+          <p class="step-title">Push your changes, then find team handoffs</p>
+          <code class="command"><span class="prompt">$</span> handoff push -m "invoice changes"<br><span class="prompt">$</span> handoff inbox</code>
+        </div>
+      </div>
+    </section>
+
+    <footer>
+      <span>Private by default. Built for developers.</span>
+      <span><a href="https://github.com/walid-baharwal/handoff">GitHub</a> · <a href="/downloads/SHA256SUMS">Checksums</a> · <a href="/healthz">Health</a></span>
+    </footer>
+  </main>
+</body>
+</html>`))
+
+type homeTemplateData struct {
+	Version   string
+	ServerURL string
+}
 
 type serviceConfig struct {
 	Token       string
@@ -104,8 +210,15 @@ func (s *service) handleHome(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	fmt.Fprintf(w, "Handoff %s\n\nDownload a client from /downloads/ and run:\n  handoff setup --server %s://%s\n", Version, forwardedScheme(r), r.Host)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+	w.Header().Set("Cache-Control", "no-cache")
+	if err := homeTemplate.Execute(w, homeTemplateData{
+		Version:   Version,
+		ServerURL: forwardedScheme(r) + "://" + r.Host,
+	}); err != nil {
+		s.logger.Printf("render homepage error=%q", err)
+	}
 }
 
 func forwardedScheme(r *http.Request) string {
