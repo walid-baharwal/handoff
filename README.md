@@ -199,6 +199,22 @@ Or restore the exact state from before the pull:
 handoff abort abcdef123456
 ```
 
+## Editor and IDE integrations
+
+Handoff provides a versioned JSON command interface for lightweight editor
+extensions. Inbox listing, inspection, push preview/upload, pull preview/apply,
+and recovery status support `--json`. Automated setup can pass the team token
+through standard input without exposing it in process arguments:
+
+```bash
+printf '%s\n' "$HANDOFF_TOKEN" | handoff setup --server https://handoff.example.com --token-stdin
+handoff list --json
+handoff status --json
+```
+
+See the [editor integration API](docs/editor-integration-api.md) for the exact
+stdout, stderr, exit-code, response, and error contract.
+
 ## Self-host with Docker Compose
 
 Requirements:

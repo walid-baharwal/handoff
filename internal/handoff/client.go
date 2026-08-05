@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -32,20 +31,23 @@ func (values *stringListFlag) Set(value string) error {
 }
 
 func runPush(args []string, stdin io.Reader, stdout io.Writer) error {
-	fs := flag.NewFlagSet("push", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
+	fs := newSilentFlagSet("push")
 	message := fs.String("m", "", "handoff message")
 	dryRun := fs.Bool("dry-run", false, "preview without uploading")
+	jsonOutput := fs.Bool("json", false, "print machine-readable JSON")
 	interactive := fs.Bool("interactive", false, "select changed paths interactively")
 	staged := fs.Bool("staged", false, "include staged changes only")
 	worktree := fs.Bool("worktree", false, "include worktree changes only")
 	var excludes stringListFlag
 	fs.Var(&excludes, "exclude", "exclude a file or directory (repeatable)")
 	if err := fs.Parse(args); err != nil {
-		return err
+		return invalidArguments(err.Error())
 	}
 	if *staged && *worktree {
-		return errors.New("--staged and --worktree cannot be used together")
+		return invalidArguments("--staged and --worktree cannot be used together")
+	}
+	if *interactive && *jsonOutput {
+		return invalidArguments("--interactive and --json cannot be used together")
 	}
 	mode := pushModeAll
 	if *staged {
@@ -95,12 +97,38 @@ func runPush(args []string, stdin io.Reader, stdout io.Writer) error {
 		return err
 	}
 	if *dryRun {
+		if *jsonOutput {
+			return writeIntegrationJSON(stdout, "push", struct {
+				Status  string             `json:"status"`
+				DryRun  bool               `json:"dry_run"`
+				Mode    pushMode           `json:"mode"`
+				Handoff integrationHandoff `json:"handoff"`
+			}{
+				Status:  "previewed",
+				DryRun:  true,
+				Mode:    mode,
+				Handoff: integrationHandoffFromManifest(metadata, "", packageInfo.Size()),
+			})
+		}
 		printPushPreview(stdout, metadata, mode, packageInfo.Size())
 		return nil
 	}
 	id, err := uploadPackage(cfg, packagePath)
 	if err != nil {
 		return err
+	}
+	if *jsonOutput {
+		return writeIntegrationJSON(stdout, "push", struct {
+			Status  string             `json:"status"`
+			DryRun  bool               `json:"dry_run"`
+			Mode    pushMode           `json:"mode"`
+			Handoff integrationHandoff `json:"handoff"`
+		}{
+			Status:  "uploaded",
+			DryRun:  false,
+			Mode:    mode,
+			Handoff: integrationHandoffFromManifest(metadata, id, packageInfo.Size()),
+		})
 	}
 	fmt.Fprintf(stdout, "Handoff uploaded successfully\nID: %s\n", id)
 	if metadata.Author != "" {
@@ -241,7 +269,7 @@ func uploadPackage(cfg clientConfig, path string) (string, error) {
 	req.Header.Set("Content-Type", "application/vnd.handoff.package")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("upload failed: %w", err)
+		return "", commandError("server_unavailable", fmt.Errorf("upload failed: %w", err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusCreated {
@@ -260,15 +288,21 @@ func uploadPackage(cfg clientConfig, path string) (string, error) {
 }
 
 func runPull(args []string, stdin io.Reader, stdout io.Writer) error {
-	fs := flag.NewFlagSet("pull", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
+	fs := newSilentFlagSet("pull")
 	dryRun := fs.Bool("dry-run", false, "inspect without applying")
 	yes := fs.Bool("yes", false, "skip interactive confirmation")
+	jsonOutput := fs.Bool("json", false, "print machine-readable JSON")
 	if err := fs.Parse(args); err != nil {
-		return err
+		return invalidArguments(err.Error())
 	}
 	if len(fs.Args()) > 1 {
-		return errors.New("usage: handoff pull [--dry-run] [--yes] [ID]")
+		return invalidArguments("usage: handoff pull [--dry-run] [--yes] [--json] [ID]")
+	}
+	if *jsonOutput && len(fs.Args()) == 0 {
+		return invalidArguments("--json requires a handoff ID")
+	}
+	if len(fs.Args()) == 1 && !idPattern.MatchString(strings.ToLower(fs.Args()[0])) {
+		return invalidArguments("usage: handoff pull [--dry-run] [--yes] [--json] [ID]")
 	}
 	cfg, err := loadConfig()
 	if err != nil {
@@ -303,18 +337,35 @@ func runPull(args []string, stdin io.Reader, stdout io.Writer) error {
 		}
 	} else {
 		id = strings.ToLower(fs.Args()[0])
-		if !idPattern.MatchString(id) {
-			return errors.New("usage: handoff pull [--dry-run] [--yes] [ID]")
+		if *jsonOutput {
+			selected, err = getHandoffMetadata(cfg, id)
+			if err != nil {
+				return err
+			}
+		} else {
+			selected, _ = getHandoffMetadata(cfg, id)
 		}
-		selected, _ = getHandoffMetadata(cfg, id)
 	}
-	if selected.ID != "" {
+	if selected.ID != "" && !*jsonOutput {
 		fmt.Fprintln(stdout)
 		printHandoffMetadata(stdout, selected)
 	}
 	if *dryRun {
 		if selected.ID == "" {
 			return errors.New("handoff metadata is unavailable; the server may predate inbox support")
+		}
+		if *jsonOutput {
+			return writeIntegrationJSON(stdout, "pull", struct {
+				Status  string             `json:"status"`
+				DryRun  bool               `json:"dry_run"`
+				Applied bool               `json:"applied"`
+				Handoff integrationHandoff `json:"handoff"`
+			}{
+				Status:  "previewed",
+				DryRun:  true,
+				Applied: false,
+				Handoff: integrationHandoffFromMetadata(selected),
+			})
 		}
 		fmt.Fprintln(stdout, "\nDry run complete; no files were changed.")
 		return nil
@@ -338,7 +389,29 @@ func runPull(args []string, stdin io.Reader, stdout io.Writer) error {
 	if err := downloadPackage(cfg, id, packagePath); err != nil {
 		return err
 	}
-	return applyHandoffPackage(id, packagePath, tmpDir, stdout)
+	applyOutput := stdout
+	if *jsonOutput {
+		applyOutput = io.Discard
+	}
+	if err := applyHandoffPackage(id, packagePath, tmpDir, applyOutput); err != nil {
+		return err
+	}
+	if *jsonOutput {
+		return writeIntegrationJSON(stdout, "pull", struct {
+			Status   string             `json:"status"`
+			DryRun   bool               `json:"dry_run"`
+			Applied  bool               `json:"applied"`
+			Handoff  integrationHandoff `json:"handoff"`
+			Recovery recoveryStatus     `json:"recovery"`
+		}{
+			Status:   "applied",
+			DryRun:   false,
+			Applied:  true,
+			Handoff:  integrationHandoffFromMetadata(selected),
+			Recovery: recoveryStatus{ConflictedFiles: []string{}},
+		})
+	}
+	return nil
 }
 
 func selectHandoff(stdin *bufio.Reader, stdout io.Writer, items []handoffMetadata) (handoffMetadata, error) {
@@ -401,7 +474,7 @@ func downloadPackage(cfg clientConfig, id, destination string) error {
 	req.Header.Set("Authorization", "Bearer "+cfg.Token)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("download failed: %w", err)
+		return commandError("server_unavailable", fmt.Errorf("download failed: %w", err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -433,7 +506,18 @@ func responseError(prefix string, resp *http.Response) error {
 	if detail == "" {
 		detail = resp.Status
 	}
-	return fmt.Errorf("%s: %s", prefix, detail)
+	code := "server_error"
+	switch resp.StatusCode {
+	case http.StatusUnauthorized, http.StatusForbidden:
+		code = "authentication_failed"
+	case http.StatusNotFound:
+		code = "not_found"
+	case http.StatusConflict:
+		code = "server_conflict"
+	case http.StatusRequestEntityTooLarge:
+		code = "package_too_large"
+	}
+	return commandError(code, fmt.Errorf("%s: %s", prefix, detail))
 }
 
 func runContinue(args []string, stdout io.Writer) error {
