@@ -1,0 +1,86 @@
+{
+  "name": "handoff-vscode",
+  "displayName": "Handoff",
+  "description": "Share and apply uncommitted Git changes through Handoff.",
+  "version": "0.0.0-development",
+  "publisher": "walid-baharwal",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/walid-baharwal/handoff.git"
+  },
+  "engines": {
+    "vscode": "^1.95.0"
+  },
+  "categories": [
+    "SCM Providers"
+  ],
+  "keywords": [
+    "git",
+    "handoff",
+    "patch",
+    "collaboration"
+  ],
+  "main": "./extension.js",
+  "files": [
+    "extension.js",
+    "lib/**",
+    "bin/**",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "extensionKind": [
+    "workspace"
+  ],
+  "activationEvents": [],
+  "contributes": {
+    "commands": [
+      {
+        "command": "handoff.configure",
+        "title": "Handoff: Configure Server"
+      },
+      {
+        "command": "handoff.openInbox",
+        "title": "Handoff: Open Inbox"
+      },
+      {
+        "command": "handoff.pushChanges",
+        "title": "Handoff: Push Changes"
+      },
+      {
+        "command": "handoff.pullHandoff",
+        "title": "Handoff: Pull Handoff"
+      },
+      {
+        "command": "handoff.showRecovery",
+        "title": "Handoff: Show Recovery Status"
+      },
+      {
+        "command": "handoff.continueRecovery",
+        "title": "Handoff: Continue Recovery"
+      },
+      {
+        "command": "handoff.abortRecovery",
+        "title": "Handoff: Abort Recovery"
+      }
+    ],
+    "configuration": {
+      "title": "Handoff",
+      "properties": {
+        "handoff.binaryPath": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Optional path to a Handoff binary. Leave empty to use the binary bundled with this extension."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "test": "node --test",
+    "package": "node scripts/package-vsix.mjs"
+  },
+  "devDependencies": {
+    "@vscode/vsce": "3.6.2"
+  }
+}
