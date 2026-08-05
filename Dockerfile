@@ -4,15 +4,16 @@ ARG VERSION=dev
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
-COPY *.go ./
+COPY cmd ./cmd
+COPY internal ./internal
 
 RUN mkdir -p /out /downloads \
-    && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/handoff . \
-    && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /downloads/handoff-linux-amd64 . \
-    && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /downloads/handoff-linux-arm64 . \
-    && CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /downloads/handoff-windows-amd64.exe . \
-    && CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /downloads/handoff-darwin-amd64 . \
-    && CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /downloads/handoff-darwin-arm64 . \
+    && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w -X handoff/internal/handoff.Version=${VERSION}" -o /out/handoff ./cmd/handoff \
+    && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w -X handoff/internal/handoff.Version=${VERSION}" -o /downloads/handoff-linux-amd64 ./cmd/handoff \
+    && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w -X handoff/internal/handoff.Version=${VERSION}" -o /downloads/handoff-linux-arm64 ./cmd/handoff \
+    && CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w -X handoff/internal/handoff.Version=${VERSION}" -o /downloads/handoff-windows-amd64.exe ./cmd/handoff \
+    && CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags="-s -w -X handoff/internal/handoff.Version=${VERSION}" -o /downloads/handoff-darwin-amd64 ./cmd/handoff \
+    && CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags="-s -w -X handoff/internal/handoff.Version=${VERSION}" -o /downloads/handoff-darwin-arm64 ./cmd/handoff \
     && cd /downloads \
     && sha256sum handoff-* > SHA256SUMS
 
