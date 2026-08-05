@@ -107,6 +107,65 @@ func TestGitHandoffRegression(t *testing.T) {
 		assertFile(t, filepath.Join(receiver, "delete.txt"), "delete me\n")
 	})
 
+	t.Run("excluded paths are omitted", func(t *testing.T) {
+		sender, receiver := clonePair(t)
+		writeFile(t, filepath.Join(sender, "app.txt"), "included\n")
+		writeFile(t, filepath.Join(sender, "delete.txt"), "excluded\n")
+		packagePath := buildFromOptions(t, sender, nil, []string{"delete.txt"}, pushModeAll)
+		applyFrom(t, receiver, packagePath, false)
+		assertFile(t, filepath.Join(receiver, "app.txt"), "included\n")
+		assertFile(t, filepath.Join(receiver, "delete.txt"), "delete me\n")
+	})
+
+	t.Run("staged mode sends the index version", func(t *testing.T) {
+		sender, receiver := clonePair(t)
+		writeFile(t, filepath.Join(sender, "app.txt"), "staged version\n")
+		writeFile(t, filepath.Join(sender, "staged.bin"), string([]byte{0, 1, 2, 3}))
+		if err := os.Remove(filepath.Join(sender, "delete.txt")); err != nil {
+			t.Fatal(err)
+		}
+		git(t, sender, "add", "app.txt", "staged.bin", "delete.txt")
+		writeFile(t, filepath.Join(sender, "app.txt"), "worktree version\n")
+		packagePath := buildFromOptions(t, sender, nil, nil, pushModeStaged)
+		applyFrom(t, receiver, packagePath, false)
+		assertFile(t, filepath.Join(receiver, "app.txt"), "staged version\n")
+		assertFile(t, filepath.Join(receiver, "staged.bin"), string([]byte{0, 1, 2, 3}))
+		if _, err := os.Stat(filepath.Join(receiver, "delete.txt")); !os.IsNotExist(err) {
+			t.Fatal("staged deletion was not transferred")
+		}
+		assertFile(t, filepath.Join(sender, "app.txt"), "worktree version\n")
+		if staged := git(t, sender, "show", ":app.txt"); staged != "staged version" {
+			t.Fatalf("sender index changed: %q", staged)
+		}
+	})
+
+	t.Run("worktree mode omits staged-only paths", func(t *testing.T) {
+		sender, receiver := clonePair(t)
+		writeFile(t, filepath.Join(sender, "app.txt"), "staged version\n")
+		git(t, sender, "add", "app.txt")
+		writeFile(t, filepath.Join(sender, "app.txt"), "worktree version\n")
+		writeFile(t, filepath.Join(sender, "delete.txt"), "staged only\n")
+		git(t, sender, "add", "delete.txt")
+		writeFile(t, filepath.Join(sender, "untracked.txt"), "worktree only\n")
+		packagePath := buildFromOptions(t, sender, nil, nil, pushModeWorktree)
+		applyFrom(t, receiver, packagePath, false)
+		assertFile(t, filepath.Join(receiver, "app.txt"), "worktree version\n")
+		assertFile(t, filepath.Join(receiver, "delete.txt"), "delete me\n")
+		assertFile(t, filepath.Join(receiver, "untracked.txt"), "worktree only\n")
+	})
+
+	t.Run("path arguments are literal", func(t *testing.T) {
+		sender, receiver := clonePair(t)
+		writeFile(t, filepath.Join(sender, "[abc].txt"), "literal\n")
+		writeFile(t, filepath.Join(sender, "a.txt"), "pattern match\n")
+		packagePath := buildFrom(t, sender, []string{"[abc].txt"})
+		applyFrom(t, receiver, packagePath, false)
+		assertFile(t, filepath.Join(receiver, "[abc].txt"), "literal\n")
+		if _, err := os.Stat(filepath.Join(receiver, "a.txt")); !os.IsNotExist(err) {
+			t.Fatal("Git pathspec magic selected an unintended file")
+		}
+	})
+
 	t.Run("dirty receiver merges non-overlapping local work", func(t *testing.T) {
 		sender, receiver := clonePair(t)
 		writeFile(t, filepath.Join(sender, "app.txt"), "sender\n")
@@ -282,6 +341,25 @@ func buildFrom(t *testing.T, sender string, paths []string) string {
 	packagePath := filepath.Join(t.TempDir(), "changes.handoff")
 	inDirectory(t, sender, func() {
 		if _, err := buildHandoffPackage(packagePath, "test", paths); err != nil {
+			t.Fatal(err)
+		}
+	})
+	return packagePath
+}
+
+func buildFromOptions(t *testing.T, sender string, paths, excludes []string, mode pushMode) string {
+	t.Helper()
+	packagePath := filepath.Join(t.TempDir(), "changes.handoff")
+	inDirectory(t, sender, func() {
+		root, err := repositoryRoot()
+		if err != nil {
+			t.Fatal(err)
+		}
+		selected, err := selectHandoffPaths(root, paths, excludes, mode)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := buildHandoffPackageFromPaths(root, packagePath, "test", selected, mode); err != nil {
 			t.Fatal(err)
 		}
 	})
