@@ -28,6 +28,7 @@ jobs:
         run: |
           go test ./...
           npm test --prefix npm
+          npm test --prefix vscode
       - name: Validate version
         env:
           VERSION: ${{ github.ref_name }}
@@ -48,6 +49,19 @@ jobs:
           node npm/scripts/prepare-packages.mjs --version "$VERSION" --binaries dist --output npm/dist
           node npm/scripts/verify-packages.mjs npm/dist
           node npm/scripts/smoke.mjs npm/dist
+      - name: Build VS Code extension packages
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          npm ci --prefix vscode
+          node vscode/scripts/package-vsix.mjs --version "$VERSION" --binaries dist --output vscode/dist
+      - name: Verify VS Code publishing configuration
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: |
+          if [[ -z "$VSCE_PAT" ]]; then
+            echo "VSCE_PAT is required to publish the VS Code extension. See docs/vscode-publishing.md."
+            exit 1
+          fi
       - name: Publish npm packages
         env:
           NPM_BOOTSTRAP_TOKEN: ${{ secrets.NPM_TOKEN }}
@@ -59,12 +73,19 @@ jobs:
             echo "Publishing with npm trusted publishing."
           fi
           node npm/scripts/publish-packages.mjs npm/dist
+      - name: Publish VS Code extension
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: |
+          for package in vscode/dist/*.vsix; do
+            vscode/node_modules/.bin/vsce publish --packagePath "$package" --pat "$VSCE_PAT"
+          done
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+            gh release upload "$GITHUB_REF_NAME" dist/* vscode/dist/*.vsix --clobber
           else
-            gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes
+            gh release create "$GITHUB_REF_NAME" dist/* vscode/dist/*.vsix --verify-tag --generate-notes
           fi

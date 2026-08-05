@@ -215,6 +215,19 @@ handoff status --json
 See the [editor integration API](docs/editor-integration-api.md) for the exact
 stdout, stderr, exit-code, response, and error contract.
 
+### Visual Studio Code
+
+The Handoff Visual Studio Code extension provides inbox, push, pull, setup, and
+conflict-recovery commands from the Command Palette. It ships as a
+platform-specific VSIX with the matching Go binary included, so users do not
+need to install the npm package globally.
+
+Install it from the Visual Studio Marketplace after the first extension release,
+or use **Extensions: Install from VSIX...** with the matching asset attached to
+the GitHub Release. Repository owners can follow the
+[VS Code publishing guide](docs/vscode-publishing.md) to configure automated
+Marketplace releases.
+
 ## Self-host with Docker Compose
 
 Requirements:

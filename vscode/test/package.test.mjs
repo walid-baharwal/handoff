@@ -1,0 +1,33 @@
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+import test from "node:test";
+import { parseArguments, platforms, validateVersion } from "../scripts/package-vsix.mjs";
+
+test("maps every release binary to a VS Code target", () => {
+  assert.deepEqual(platforms.map((platform) => platform.target), [
+    "linux-x64",
+    "linux-arm64",
+    "darwin-x64",
+    "darwin-arm64",
+    "win32-x64"
+  ]);
+  assert.equal(new Set(platforms.map((platform) => platform.sourceBinary)).size, platforms.length);
+});
+
+test("accepts release versions and parses packaging arguments", () => {
+  validateVersion("1.2.3");
+  validateVersion("1.2.3-rc.1");
+  assert.throws(() => validateVersion("v1.2.3"), /invalid extension version/);
+  assert.deepEqual(parseArguments(["--version", "1.2.3", "--binaries", "dist", "--output", "vscode/dist"]), {
+    version: "1.2.3",
+    binariesDirectory: path.resolve("dist"),
+    outputDirectory: path.resolve("vscode/dist")
+  });
+  assert.throws(() => parseArguments(["--version", "1.2.3"]), /usage/);
+});
+
+test("extension manifest whitelists only runtime files", async () => {
+  const manifest = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
+  assert.deepEqual(manifest.files, ["extension.js", "lib/**", "bin/**", "README.md", "LICENSE", "CHANGELOG.md"]);
+});
