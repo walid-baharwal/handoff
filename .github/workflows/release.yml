@@ -6,33 +6,67 @@ on:
 
 permissions:
   contents: write
+  id-token: write
 
 jobs:
   release:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
       - name: Test
-        run: go test ./...
-      - name: Build binaries
+        run: |
+          go test ./...
+          npm test --prefix npm
+      - name: Prepare release tools
+        run: npm install --global npm@latest
+      - name: Validate version
         env:
-          CGO_ENABLED: "0"
+          VERSION: ${{ github.ref_name }}
+        run: node npm/scripts/validate-version.mjs "${VERSION#v}"
+      - name: Require a commit from main
+        run: |
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || {
+            echo "Release tags must point to a commit contained in main."
+            exit 1
+          }
+      - name: Build binaries
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          LDFLAGS="-s -w -X handoff/internal/handoff.Version=$VERSION"
-          mkdir dist
-          GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="$LDFLAGS" -o dist/handoff-linux-amd64 ./cmd/handoff
-          GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="$LDFLAGS" -o dist/handoff-linux-arm64 ./cmd/handoff
-          GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="$LDFLAGS" -o dist/handoff-windows-amd64.exe ./cmd/handoff
-          GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags="$LDFLAGS" -o dist/handoff-darwin-amd64 ./cmd/handoff
-          GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags="$LDFLAGS" -o dist/handoff-darwin-arm64 ./cmd/handoff
-          cd dist
-          sha256sum handoff-* > SHA256SUMS
+          bash scripts/build-release-binaries.sh "$VERSION" dist
+      - name: Build and verify npm packages
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          node npm/scripts/prepare-packages.mjs --version "$VERSION" --binaries dist --output npm/dist
+          node npm/scripts/verify-packages.mjs npm/dist
+          node npm/scripts/smoke.mjs npm/dist
+      - name: Publish npm packages
+        env:
+          NPM_BOOTSTRAP_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [[ -n "$NPM_BOOTSTRAP_TOKEN" ]]; then
+            export NODE_AUTH_TOKEN="$NPM_BOOTSTRAP_TOKEN"
+            echo "Publishing with the temporary bootstrap token. Remove it after trusted publishing is configured."
+          else
+            echo "Publishing with npm trusted publishing."
+          fi
+          node npm/scripts/publish-packages.mjs npm/dist
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes
+          fi

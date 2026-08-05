@@ -1,0 +1,38 @@
+{
+  "name": "@walid-baharwal/handoff",
+  "version": "0.0.0-development",
+  "private": true,
+  "description": "Share uncommitted Git changes without temporary commits",
+  "license": "MIT",
+  "bin": {
+    "handoff": "bin/handoff.js"
+  },
+  "files": [
+    "bin",
+    "lib",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "optionalDependencies": {
+    "@walid-baharwal/handoff-darwin-arm64": "0.0.0-development",
+    "@walid-baharwal/handoff-darwin-x64": "0.0.0-development",
+    "@walid-baharwal/handoff-linux-arm64": "0.0.0-development",
+    "@walid-baharwal/handoff-linux-x64": "0.0.0-development",
+    "@walid-baharwal/handoff-windows-x64": "0.0.0-development"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/walid-baharwal/handoff.git",
+    "directory": "npm/cli"
+  },
+  "homepage": "https://github.com/walid-baharwal/handoff#readme",
+  "bugs": {
+    "url": "https://github.com/walid-baharwal/handoff/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

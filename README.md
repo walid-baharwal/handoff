@@ -28,6 +28,26 @@ Git LFS files and submodule changes are not supported in version 1.
 
 ## Install
 
+### npm
+
+If Node.js 18 or newer is installed, npm can install the official CLI and the
+correct native binary for the current platform:
+
+```bash
+npm install --global @walid-baharwal/handoff
+handoff version
+```
+
+This is the same Go application as the standalone download, not a separate
+JavaScript implementation. Upgrade or remove it with:
+
+```bash
+npm install --global @walid-baharwal/handoff@latest
+npm uninstall --global @walid-baharwal/handoff
+```
+
+### Standalone binary
+
 Download the binary for your system from the repository's **Releases** page:
 
 | System | Binary |
@@ -256,12 +276,17 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the complete workflow.
 
 ## Releases
 
-CI runs tests on every push and pull request. Pushing a version tag builds all supported binaries, creates checksums, and publishes a GitHub Release:
+CI runs tests on every push and pull request. Pushing a version tag builds all
+supported binaries, creates checksums, publishes the matching npm packages,
+and publishes a GitHub Release:
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.2.0
+git push origin v0.2.0
 ```
+
+Repository maintainers must complete the one-time npm setup before the first
+npm-enabled release. See [npm publishing for repository owners](docs/npm-publishing.md).
 
 ## License
 

@@ -38,7 +38,19 @@ jobs:
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          package-manager-cache: false
       - run: go test ./...
       - run: go vet ./...
+      - run: npm test --prefix npm
       - if: runner.os == 'Linux'
         run: docker build -t handoff:test .
+      - if: runner.os == 'Linux'
+        name: Build and smoke-test npm packages
+        run: |
+          bash scripts/build-release-binaries.sh 0.0.0-ci npm/test-binaries
+          node npm/scripts/prepare-packages.mjs --version 0.0.0-ci --binaries npm/test-binaries --output npm/dist
+          node npm/scripts/verify-packages.mjs npm/dist
+          node npm/scripts/smoke.mjs npm/dist
