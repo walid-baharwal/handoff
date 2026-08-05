@@ -1,0 +1,9 @@
+{
+  "name": "handoff-npm-workspace",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Development tools for the Handoff npm distribution",
+  "scripts": {
+    "test": "node --test"
+  }
+}

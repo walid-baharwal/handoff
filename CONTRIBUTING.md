@@ -5,6 +5,9 @@
 3. Run `go test ./...` and `go vet ./...`.
 4. Open a pull request to `walid-baharwal/handoff:sandbox`.
 
+Changes under `npm/`, the release scripts, or the npm workflows must also pass
+`npm test --prefix npm` using Node.js 24.
+
 Linux, Windows, and macOS CI must pass, conversations must be resolved, and
 `@walid-baharwal` must approve the pull request before it can be merged.
 
