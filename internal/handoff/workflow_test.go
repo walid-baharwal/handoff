@@ -61,3 +61,46 @@ func TestInteractiveInboxPullEndToEnd(t *testing.T) {
 		t.Fatalf("unexpected interactive output:\n%s", output.String())
 	}
 }
+
+func TestInteractivePushDryRunDoesNotRequireServerConfiguration(t *testing.T) {
+	sender, _ := clonePair(t)
+	writeFile(t, filepath.Join(sender, "app.txt"), "selected preview\n")
+	writeFile(t, filepath.Join(sender, "delete.txt"), "excluded preview\n")
+	var output bytes.Buffer
+	inDirectory(t, sender, func() {
+		err := runPush(
+			[]string{"--dry-run", "--interactive", "--exclude", "delete.txt", "-m", "preview"},
+			strings.NewReader("all\n"),
+			&output,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+	})
+	for _, expected := range []string{
+		"CHANGED PATHS",
+		"app.txt",
+		"HANDOFF PUSH PREVIEW",
+		"Selection: all changes",
+		"Message: preview",
+		"Files: 1",
+		"Dry run complete; no files were uploaded.",
+	} {
+		if !strings.Contains(output.String(), expected) {
+			t.Fatalf("dry-run output is missing %q:\n%s", expected, output.String())
+		}
+	}
+	if strings.Contains(output.String(), "excluded preview") {
+		t.Fatalf("dry-run output exposed excluded content:\n%s", output.String())
+	}
+	if staged := git(t, sender, "diff", "--cached", "--name-only"); staged != "" {
+		t.Fatalf("dry run changed the sender index: %q", staged)
+	}
+}
+
+func TestPushRejectsConflictingModes(t *testing.T) {
+	err := runPush([]string{"--dry-run", "--staged", "--worktree"}, strings.NewReader(""), &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "cannot be used together") {
+		t.Fatalf("expected conflicting mode error, got %v", err)
+	}
+}

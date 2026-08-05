@@ -16,16 +16,69 @@ import (
 	"time"
 )
 
-func runPush(args []string, stdout io.Writer) error {
+type stringListFlag []string
+
+func (values *stringListFlag) String() string {
+	return strings.Join(*values, ",")
+}
+
+func (values *stringListFlag) Set(value string) error {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return errors.New("path cannot be empty")
+	}
+	*values = append(*values, value)
+	return nil
+}
+
+func runPush(args []string, stdin io.Reader, stdout io.Writer) error {
 	fs := flag.NewFlagSet("push", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	message := fs.String("m", "", "handoff message")
+	dryRun := fs.Bool("dry-run", false, "preview without uploading")
+	interactive := fs.Bool("interactive", false, "select changed paths interactively")
+	staged := fs.Bool("staged", false, "include staged changes only")
+	worktree := fs.Bool("worktree", false, "include worktree changes only")
+	var excludes stringListFlag
+	fs.Var(&excludes, "exclude", "exclude a file or directory (repeatable)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	cfg, err := loadConfig()
+	if *staged && *worktree {
+		return errors.New("--staged and --worktree cannot be used together")
+	}
+	mode := pushModeAll
+	if *staged {
+		mode = pushModeStaged
+	} else if *worktree {
+		mode = pushModeWorktree
+	}
+	var cfg clientConfig
+	var err error
+	if !*dryRun {
+		cfg, err = loadConfig()
+		if err != nil {
+			return err
+		}
+	}
+	root, err := repositoryRoot()
 	if err != nil {
 		return err
+	}
+	selectedPaths, err := selectHandoffPaths(root, fs.Args(), excludes, mode)
+	if err != nil {
+		return err
+	}
+	if *interactive {
+		var cancelled bool
+		selectedPaths, cancelled, err = choosePushPaths(bufio.NewReader(stdin), stdout, selectedPaths)
+		if err != nil {
+			return err
+		}
+		if cancelled {
+			fmt.Fprintln(stdout, "Push cancelled.")
+			return nil
+		}
 	}
 	tmpDir, err := os.MkdirTemp("", "handoff-push-*")
 	if err != nil {
@@ -33,9 +86,17 @@ func runPush(args []string, stdout io.Writer) error {
 	}
 	defer os.RemoveAll(tmpDir)
 	packagePath := filepath.Join(tmpDir, "changes.handoff")
-	metadata, err := buildHandoffPackage(packagePath, *message, fs.Args())
+	metadata, err := buildHandoffPackageFromPaths(root, packagePath, *message, selectedPaths, mode)
 	if err != nil {
 		return err
+	}
+	packageInfo, err := os.Stat(packagePath)
+	if err != nil {
+		return err
+	}
+	if *dryRun {
+		printPushPreview(stdout, metadata, mode, packageInfo.Size())
+		return nil
 	}
 	id, err := uploadPackage(cfg, packagePath)
 	if err != nil {
@@ -51,11 +112,112 @@ func runPush(args []string, stdout io.Writer) error {
 	if metadata.Branch != "" {
 		fmt.Fprintf(stdout, "Branch: %s\n", printable(metadata.Branch))
 	}
+	fmt.Fprintf(stdout, "Selection: %s\n", pushModeDescription(mode))
 	if metadata.Message != "" {
 		fmt.Fprintf(stdout, "Message: %s\n", printable(metadata.Message))
 	}
 	fmt.Fprintf(stdout, "Files: %d\n\nThis handoff is now visible in the team inbox.\nDirect command:\nhandoff pull %s\n", metadata.FileCount, id)
 	return nil
+}
+
+func choosePushPaths(stdin *bufio.Reader, stdout io.Writer, paths []string) ([]string, bool, error) {
+	fmt.Fprintln(stdout, "CHANGED PATHS")
+	for index, path := range paths {
+		fmt.Fprintf(stdout, "%3d  %s\n", index+1, printable(path))
+	}
+	fmt.Fprint(stdout, "\nSelect paths (for example 1,3-5 or all; q to cancel): ")
+	line, err := readInputLine(stdin)
+	if err != nil {
+		return nil, false, err
+	}
+	if strings.EqualFold(line, "q") || strings.EqualFold(line, "quit") {
+		return nil, true, nil
+	}
+	indices, err := parsePushSelection(line, len(paths))
+	if err != nil {
+		return nil, false, err
+	}
+	selected := make([]string, 0, len(indices))
+	for index, path := range paths {
+		if _, found := indices[index+1]; found {
+			selected = append(selected, path)
+		}
+	}
+	return selected, false, nil
+}
+
+func parsePushSelection(value string, maximum int) (map[int]struct{}, error) {
+	selected := make(map[int]struct{})
+	if strings.EqualFold(strings.TrimSpace(value), "all") {
+		for index := 1; index <= maximum; index++ {
+			selected[index] = struct{}{}
+		}
+		return selected, nil
+	}
+	parts := strings.FieldsFunc(value, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\t'
+	})
+	for _, part := range parts {
+		bounds := strings.Split(part, "-")
+		if len(bounds) > 2 {
+			return nil, fmt.Errorf("invalid selection %q", part)
+		}
+		start, err := strconv.Atoi(bounds[0])
+		if err != nil {
+			return nil, fmt.Errorf("invalid selection %q", part)
+		}
+		end := start
+		if len(bounds) == 2 {
+			end, err = strconv.Atoi(bounds[1])
+			if err != nil || end < start {
+				return nil, fmt.Errorf("invalid selection %q", part)
+			}
+		}
+		if start < 1 || end > maximum {
+			return nil, fmt.Errorf("selection %q is outside the displayed range", part)
+		}
+		for index := start; index <= end; index++ {
+			selected[index] = struct{}{}
+		}
+	}
+	if len(selected) == 0 {
+		return nil, errors.New("select at least one changed path")
+	}
+	return selected, nil
+}
+
+func printPushPreview(stdout io.Writer, metadata manifest, mode pushMode, packageBytes int64) {
+	message := metadata.Message
+	if message == "" {
+		message = "Handoff changes (default)"
+	}
+	fmt.Fprintln(stdout, "HANDOFF PUSH PREVIEW")
+	fmt.Fprintf(stdout, "From: %s (self-reported)\n", printable(orUnknown(metadata.Author)))
+	fmt.Fprintf(stdout, "Project: %s\n", printable(orUnknown(metadata.Project)))
+	fmt.Fprintf(stdout, "Branch: %s\n", printable(orUnknown(metadata.Branch)))
+	fmt.Fprintf(stdout, "Selection: %s\n", pushModeDescription(mode))
+	fmt.Fprintf(stdout, "Message: %s\n", printable(message))
+	fmt.Fprintf(stdout, "Files: %d\n", metadata.FileCount)
+	fmt.Fprintf(stdout, "Package: %s\n", formatBytes(packageBytes))
+	fmt.Fprintln(stdout, "Changed paths:")
+	for _, path := range metadata.Files {
+		fmt.Fprintf(stdout, "  %s\n", printable(path))
+	}
+	if metadata.FilesTruncated {
+		fmt.Fprintf(stdout, "  ... and %d more\n", metadata.FileCount-len(metadata.Files))
+	}
+	fmt.Fprintln(stdout, "\nDry run complete; no files were uploaded.")
+}
+
+func pushModeDescription(mode pushMode) string {
+	switch mode {
+	case pushModeStaged:
+		return "staged changes"
+	case pushModeWorktree:
+		return "worktree changes"
+	default:
+		return "all changes"
+	}
 }
 
 func uploadPackage(cfg clientConfig, path string) (string, error) {
