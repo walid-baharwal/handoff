@@ -5,7 +5,7 @@
 3. Run `go test ./...` and `go vet ./...`.
 4. Open a pull request to `walid-baharwal/handoff:sandbox`.
 
-Linux and Windows CI must pass, conversations must be resolved, and
+Linux, Windows, and macOS CI must pass, conversations must be resolved, and
 `@walid-baharwal` must approve the pull request before it can be merged.
 
 The `main` branch accepts pull requests only from this repository's `sandbox`
