@@ -49,3 +49,27 @@ func TestPrintHandoffMetadataSanitizesControlCharacters(t *testing.T) {
 		t.Fatalf("metadata output contains control characters: %q", output.String())
 	}
 }
+
+func TestParsePushSelection(t *testing.T) {
+	selected, err := parsePushSelection("1, 3-5", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, index := range []int{1, 3, 4, 5} {
+		if _, found := selected[index]; !found {
+			t.Fatalf("selection is missing %d: %#v", index, selected)
+		}
+	}
+	if _, found := selected[2]; found {
+		t.Fatalf("selection unexpectedly contains 2: %#v", selected)
+	}
+	for _, value := range []string{"", "0", "2-1", "1-6", "word"} {
+		if _, err := parsePushSelection(value, 5); err == nil {
+			t.Fatalf("accepted invalid selection %q", value)
+		}
+	}
+	all, err := parsePushSelection("all", 3)
+	if err != nil || len(all) != 3 {
+		t.Fatalf("all selection = %#v, %v", all, err)
+	}
+}

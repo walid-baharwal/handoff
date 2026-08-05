@@ -14,6 +14,7 @@ import (
 	"os/user"
 	pathpkg "path"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -36,11 +37,27 @@ const (
 	phaseFinalize = "finalize"
 )
 
+type pushMode string
+
+const (
+	pushModeAll      pushMode = "all"
+	pushModeStaged   pushMode = "staged"
+	pushModeWorktree pushMode = "worktree"
+)
+
 func buildHandoffPackage(packagePath, message string, paths []string) (manifest, error) {
 	root, err := repositoryRoot()
 	if err != nil {
 		return manifest{}, err
 	}
+	selected, err := selectHandoffPaths(root, paths, nil, pushModeAll)
+	if err != nil {
+		return manifest{}, err
+	}
+	return buildHandoffPackageFromPaths(root, packagePath, message, selected, pushModeAll)
+}
+
+func buildHandoffPackageFromPaths(root, packagePath, message string, paths []string, mode pushMode) (manifest, error) {
 	if err := ensureNoOperation(root); err != nil {
 		return manifest{}, err
 	}
@@ -61,18 +78,29 @@ func buildHandoffPackage(packagePath, message string, paths []string) (manifest,
 	}
 	defer os.RemoveAll(tmpDir)
 	indexPath := filepath.Join(tmpDir, "index")
-	gitEnv := append(os.Environ(), "GIT_INDEX_FILE="+indexPath)
+	gitEnv := append(os.Environ(), "GIT_INDEX_FILE="+indexPath, "GIT_LITERAL_PATHSPECS=1")
 	if _, err := gitOutput(root, gitEnv, "read-tree", "HEAD"); err != nil {
 		return manifest{}, err
 	}
-	pathspecs, err := normalizePathspecs(root, paths)
-	if err != nil {
-		return manifest{}, err
-	}
-	addArgs := []string{"add", "-A", "--"}
-	addArgs = append(addArgs, pathspecs...)
-	if _, err := gitOutput(root, gitEnv, addArgs...); err != nil {
-		return manifest{}, err
+	if mode == pushModeStaged {
+		patchArgs := []string{"diff", "--cached", "--binary", "--full-index", "--no-renames", "HEAD", "--"}
+		patchArgs = append(patchArgs, paths...)
+		patch, err := gitOutputRaw(root, literalPathEnv(), nil, patchArgs...)
+		if err != nil {
+			return manifest{}, err
+		}
+		if strings.TrimSpace(patch) == "" {
+			return manifest{}, errors.New("there are no staged changes to hand off")
+		}
+		if _, err := gitOutputRaw(root, gitEnv, strings.NewReader(patch), "apply", "--cached", "--binary", "--whitespace=nowarn"); err != nil {
+			return manifest{}, fmt.Errorf("prepare staged changes: %w", err)
+		}
+	} else {
+		addArgs := []string{"add", "-A", "--"}
+		addArgs = append(addArgs, paths...)
+		if _, err := gitOutput(root, gitEnv, addArgs...); err != nil {
+			return manifest{}, err
+		}
 	}
 	tree, err := gitOutput(root, gitEnv, "write-tree")
 	if err != nil {
@@ -148,6 +176,94 @@ func buildHandoffPackage(packagePath, message string, paths []string) (manifest,
 		return manifest{}, err
 	}
 	return metadata, nil
+}
+
+func selectHandoffPaths(root string, paths, excludes []string, mode pushMode) ([]string, error) {
+	pathspecs, err := normalizePathspecs(root, paths)
+	if err != nil {
+		return nil, err
+	}
+	selected, err := changedPaths(root, mode, pathspecs)
+	if err != nil {
+		return nil, err
+	}
+	if len(excludes) > 0 {
+		excludePathspecs, err := normalizePathspecs(root, excludes)
+		if err != nil {
+			return nil, err
+		}
+		excluded, err := changedPaths(root, mode, excludePathspecs)
+		if err != nil {
+			return nil, err
+		}
+		excludedSet := make(map[string]struct{}, len(excluded))
+		for _, path := range excluded {
+			excludedSet[path] = struct{}{}
+		}
+		filtered := selected[:0]
+		for _, path := range selected {
+			if _, found := excludedSet[path]; !found {
+				filtered = append(filtered, path)
+			}
+		}
+		selected = filtered
+	}
+	if len(selected) == 0 {
+		switch mode {
+		case pushModeStaged:
+			return nil, errors.New("there are no staged changes matching the selected paths")
+		case pushModeWorktree:
+			return nil, errors.New("there are no worktree changes matching the selected paths")
+		default:
+			return nil, errors.New("there are no changes matching the selected paths")
+		}
+	}
+	return selected, nil
+}
+
+func changedPaths(root string, mode pushMode, pathspecs []string) ([]string, error) {
+	env := literalPathEnv()
+	var diffArgs []string
+	switch mode {
+	case pushModeStaged:
+		diffArgs = []string{"diff", "--cached", "--no-renames", "--name-only", "-z", "HEAD", "--"}
+	case pushModeWorktree:
+		diffArgs = []string{"diff", "--no-renames", "--name-only", "-z", "--"}
+	case pushModeAll:
+		diffArgs = []string{"diff", "--no-renames", "--name-only", "-z", "HEAD", "--"}
+	default:
+		return nil, fmt.Errorf("unsupported push mode %q", mode)
+	}
+	diffArgs = append(diffArgs, pathspecs...)
+	tracked, err := gitOutputRaw(root, env, nil, diffArgs...)
+	if err != nil {
+		return nil, err
+	}
+	unique := make(map[string]struct{})
+	for _, path := range splitNUL(tracked) {
+		unique[path] = struct{}{}
+	}
+	if mode != pushModeStaged {
+		untrackedArgs := []string{"ls-files", "--others", "--exclude-standard", "-z", "--"}
+		untrackedArgs = append(untrackedArgs, pathspecs...)
+		untracked, err := gitOutputRaw(root, env, nil, untrackedArgs...)
+		if err != nil {
+			return nil, err
+		}
+		for _, path := range splitNUL(untracked) {
+			unique[path] = struct{}{}
+		}
+	}
+	result := make([]string, 0, len(unique))
+	for path := range unique {
+		result = append(result, path)
+	}
+	sort.Strings(result)
+	return result, nil
+}
+
+func literalPathEnv() []string {
+	return append(os.Environ(), "GIT_LITERAL_PATHSPECS=1")
 }
 
 func applyHandoffPackage(id, packagePath, tmpDir string, stdout io.Writer) error {
@@ -536,7 +652,7 @@ func rejectUnsupportedPaths(root string, env []string, paths []string) error {
 			return fmt.Errorf("Git LFS change %q is not supported in version 1", path)
 		}
 		indexEntry, _ := gitOutput(root, env, "ls-files", "-s", "--", path)
-		baseEntry, _ := gitOutput(root, nil, "ls-tree", "HEAD", "--", path)
+		baseEntry, _ := gitOutput(root, literalPathEnv(), "ls-tree", "HEAD", "--", path)
 		if strings.HasPrefix(indexEntry, "160000 ") || strings.HasPrefix(baseEntry, "160000 ") {
 			return fmt.Errorf("submodule change %q is not supported in version 1", path)
 		}

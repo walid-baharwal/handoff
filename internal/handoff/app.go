@@ -19,7 +19,7 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	case "setup":
 		return runSetup(args[1:], stdin, stdout)
 	case "push":
-		return runPush(args[1:], stdout)
+		return runPush(args[1:], stdin, stdout)
 	case "pull":
 		return runPull(args[1:], stdin, stdout)
 	case "list":
@@ -50,7 +50,7 @@ func printUsage(w io.Writer) {
 
 Usage:
   handoff setup --server URL
-  handoff push [-m MESSAGE] [PATH ...]
+  handoff push [-m MESSAGE] [--dry-run] [--interactive] [--staged|--worktree] [--exclude PATH] [PATH ...]
   handoff list [--all] [--json]
   handoff inspect ID
   handoff pull [--dry-run] [--yes] [ID]

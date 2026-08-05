@@ -13,6 +13,7 @@ handoff push  ── package ──> stores package ── ID ──────
 ## Features
 
 - One command to upload changes and one command to apply them.
+- Interactive, staged-only, worktree-only, exclusion, and dry-run push workflows.
 - Repository-scoped team inbox with sender, branch, message, and file summary.
 - Transfers tracked, untracked, deleted, staged, and unstaged files.
 - Sends all changes or only selected paths.
@@ -102,6 +103,35 @@ Upload only selected files or directories:
 ```bash
 handoff push -m "backend only" backend/api.go backend/models/
 ```
+
+Preview exactly what would be packaged without requiring server configuration or uploading anything:
+
+```bash
+handoff push --dry-run -m "backend only" backend/api.go backend/models/
+```
+
+Choose changed paths from a numbered list:
+
+```bash
+handoff push --interactive -m "selected changes"
+```
+
+Exclude files or directories. Repeat `--exclude` when needed:
+
+```bash
+handoff push --exclude generated/ --exclude local-notes.txt -m "without generated files"
+```
+
+Send only the version currently in Git's index, or only paths with unstaged/untracked worktree changes:
+
+```bash
+handoff push --staged -m "ready for review"
+handoff push --worktree -m "work in progress"
+```
+
+For a partially staged file, `--staged` sends the staged version. `--worktree` selects the file because it has unstaged changes and sends its complete current worktree version, which necessarily includes its staged hunks. Staged-only paths are omitted from `--worktree`.
+
+All `PATH` and `--exclude PATH` values are treated as literal repository paths rather than Git pathspec expressions. Place flags before positional paths; use `--` when a filename begins with a dash.
 
 The command prints a random ID and adds the handoff to the repository's team inbox. From another clone of the same repository, list available handoffs:
 

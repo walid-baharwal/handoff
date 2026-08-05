@@ -185,6 +185,71 @@ func TestServerRejectsInvalidPackage(t *testing.T) {
 	}
 }
 
+func TestServerHomePage(t *testing.T) {
+	service, err := newService(serviceConfig{
+		DataDir:     t.TempDir(),
+		DownloadDir: t.TempDir(),
+		MaxBytes:    defaultMaxBytes,
+		Retention:   time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "http://handoff.example.com/", nil)
+	request.Header.Set("X-Forwarded-Proto", "https")
+	response := httptest.NewRecorder()
+	service.routes().ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("home status = %d", response.Code)
+	}
+	if contentType := response.Header().Get("Content-Type"); contentType != "text/html; charset=utf-8" {
+		t.Fatalf("home content type = %q", contentType)
+	}
+	if response.Header().Get("Content-Security-Policy") == "" {
+		t.Fatal("home response is missing a content security policy")
+	}
+	body := response.Body.String()
+	for _, expected := range []string{
+		"Share work in progress.",
+		"handoff setup --server https://handoff.example.com",
+		"/downloads/handoff-linux-amd64",
+		"/downloads/handoff-darwin-arm64",
+		"/downloads/handoff-windows-amd64.exe",
+		"handoff inbox",
+	} {
+		if !strings.Contains(body, expected) {
+			t.Errorf("home response does not contain %q", expected)
+		}
+	}
+}
+
+func TestServerHomePageEscapesHost(t *testing.T) {
+	service, err := newService(serviceConfig{
+		DataDir:     t.TempDir(),
+		DownloadDir: t.TempDir(),
+		MaxBytes:    defaultMaxBytes,
+		Retention:   time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "http://handoff.example.com/", nil)
+	request.Host = `handoff.example.com<script>alert(1)</script>`
+	response := httptest.NewRecorder()
+	service.routes().ServeHTTP(response, request)
+
+	body := response.Body.String()
+	if strings.Contains(body, "<script>alert(1)</script>") {
+		t.Fatal("home response did not escape the request host")
+	}
+	if !strings.Contains(body, "&lt;script&gt;") {
+		t.Fatal("home response does not contain the escaped request host")
+	}
+}
+
 func request(t *testing.T, method, url, token string, body []byte) *http.Response {
 	t.Helper()
 	request, err := http.NewRequest(method, url, bytes.NewReader(body))
