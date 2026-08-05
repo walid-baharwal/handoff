@@ -191,6 +191,11 @@ docker run --rm -v "$PWD:/src" -w /src golang:1.24 go test ./...
 docker build -t handoff .
 ```
 
+## Contributing
+
+Fork the repository and open pull requests against `sandbox`, not `main`.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the complete workflow.
+
 ## Releases
 
 CI runs tests on every push and pull request. Pushing a version tag builds all supported binaries, creates checksums, and publishes a GitHub Release:
