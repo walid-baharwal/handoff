@@ -9,6 +9,24 @@ permissions:
   contents: read
 
 jobs:
+  main-source:
+    name: main source
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require sandbox as the source of main pull requests
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_REF: ${{ github.head_ref }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+        run: |
+          if [[ "$EVENT_NAME" == "pull_request" && "$BASE_REF" == "main" ]]; then
+            [[ "$HEAD_REF" == "sandbox" && "$HEAD_REPOSITORY" == "$GITHUB_REPOSITORY" ]] || {
+              echo "Pull requests to main must come from walid-baharwal/handoff:sandbox."
+              exit 1
+            }
+          fi
+
   test:
     strategy:
       matrix:
