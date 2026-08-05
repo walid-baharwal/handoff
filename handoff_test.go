@@ -131,6 +131,62 @@ func TestPackageRejectsChecksumWhenBundleComesFirst(t *testing.T) {
 }
 
 func TestGitHandoffRegression(t *testing.T) {
+	t.Run("abort before backup preserves untouched local changes", func(t *testing.T) {
+		_, receiver := clonePair(t)
+		writeFile(t, filepath.Join(receiver, "app.txt"), "local before backup\n")
+		originalHead := git(t, receiver, "rev-parse", "HEAD")
+		state := handoffState{
+			ID:           testID,
+			OriginalHead: originalHead,
+			IncomingRef:  "refs/handoff/incoming/" + testID,
+			Phase:        phasePrepare,
+		}
+		if err := saveState(statePath(receiver), state); err != nil {
+			t.Fatal(err)
+		}
+		inDirectory(t, receiver, func() {
+			if err := abortHandoff(testID, io.Discard); err != nil {
+				t.Fatal(err)
+			}
+		})
+		assertFile(t, filepath.Join(receiver, "app.txt"), "local before backup\n")
+		assertNoState(t, receiver)
+	})
+
+	t.Run("continue cannot discard an incomplete local restore", func(t *testing.T) {
+		_, receiver := clonePair(t)
+		writeFile(t, filepath.Join(receiver, "app.txt"), "protected local work\n")
+		backupHash := git(t, receiver, "stash", "create", "handoff backup "+testID)
+		git(t, receiver, "update-ref", backupRef(testID), backupHash)
+		state := handoffState{
+			ID:            testID,
+			OriginalHead:  git(t, receiver, "rev-parse", "HEAD"),
+			IncomingRef:   "refs/handoff/incoming/" + testID,
+			StashHash:     backupHash,
+			PrivateBackup: true,
+			Phase:         phaseRestore,
+		}
+		if err := saveState(statePath(receiver), state); err != nil {
+			t.Fatal(err)
+		}
+		inDirectory(t, receiver, func() {
+			err := continueHandoff(testID, io.Discard)
+			if err == nil || !strings.Contains(err.Error(), "handoff abort") {
+				t.Fatalf("expected safe abort instruction, got %v", err)
+			}
+		})
+		if got := git(t, receiver, "rev-parse", backupRef(testID)); got != backupHash {
+			t.Fatal("continue discarded the local backup")
+		}
+		inDirectory(t, receiver, func() {
+			if err := abortHandoff(testID, io.Discard); err != nil {
+				t.Fatal(err)
+			}
+		})
+		assertFile(t, filepath.Join(receiver, "app.txt"), "protected local work\n")
+		assertNoState(t, receiver)
+	})
+
 	t.Run("clean apply keeps receiver HEAD and sender index unchanged", func(t *testing.T) {
 		sender, receiver := clonePair(t)
 		writeFile(t, filepath.Join(sender, "app.txt"), "sender change\n")
@@ -180,6 +236,77 @@ func TestGitHandoffRegression(t *testing.T) {
 		if stash := git(t, receiver, "stash", "list"); stash != "" {
 			t.Fatalf("backup stash was not removed: %s", stash)
 		}
+	})
+
+	t.Run("untracked files remain in place while tracked work is backed up", func(t *testing.T) {
+		sender, receiver := clonePair(t)
+		writeFile(t, filepath.Join(sender, "app.txt"), "sender\n")
+		packagePath := buildFrom(t, sender, nil)
+
+		writeFile(t, filepath.Join(receiver, "delete.txt"), "receiver\n")
+		logDir := filepath.Join(receiver, "runtime")
+		if err := os.Mkdir(logDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		logPath := filepath.Join(logDir, "active.log")
+		writeFile(t, logPath, "still running\n")
+		activeLog, err := os.OpenFile(logPath, os.O_APPEND|os.O_WRONLY, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer activeLog.Close()
+		if err := os.Chmod(logDir, 0o500); err != nil {
+			t.Fatal(err)
+		}
+		defer os.Chmod(logDir, 0o700)
+
+		applyFrom(t, receiver, packagePath, false)
+		assertFile(t, filepath.Join(receiver, "app.txt"), "sender\n")
+		assertFile(t, filepath.Join(receiver, "delete.txt"), "receiver\n")
+		assertFile(t, logPath, "still running\n")
+		if stash := git(t, receiver, "stash", "list"); stash != "" {
+			t.Fatalf("backup stash was not removed: %s", stash)
+		}
+	})
+
+	t.Run("untracked collision restores tracked local work", func(t *testing.T) {
+		sender, receiver := clonePair(t)
+		writeFile(t, filepath.Join(sender, "collision.txt"), "incoming\n")
+		packagePath := buildFrom(t, sender, nil)
+
+		writeFile(t, filepath.Join(receiver, "collision.txt"), "local untracked\n")
+		writeFile(t, filepath.Join(receiver, "delete.txt"), "local tracked\n")
+		beforeHead := git(t, receiver, "rev-parse", "HEAD")
+		err := applyFrom(t, receiver, packagePath, true)
+		if err == nil || !strings.Contains(err.Error(), "would be overwritten") {
+			t.Fatalf("expected untracked collision, got %v", err)
+		}
+		if got := git(t, receiver, "rev-parse", "HEAD"); got != beforeHead {
+			t.Fatal("failed pull changed receiver HEAD")
+		}
+		assertFile(t, filepath.Join(receiver, "collision.txt"), "local untracked\n")
+		assertFile(t, filepath.Join(receiver, "delete.txt"), "local tracked\n")
+		assertNoState(t, receiver)
+		if stash := git(t, receiver, "stash", "list"); stash != "" {
+			t.Fatalf("failed pull left a stash: %s", stash)
+		}
+	})
+
+	t.Run("existing user stash is untouched", func(t *testing.T) {
+		sender, receiver := clonePair(t)
+		writeFile(t, filepath.Join(sender, "app.txt"), "sender\n")
+		packagePath := buildFrom(t, sender, nil)
+
+		writeFile(t, filepath.Join(receiver, "app.txt"), "saved for later\n")
+		git(t, receiver, "stash", "push", "--message", "user stash")
+		before := git(t, receiver, "stash", "list", "--format=%H")
+		writeFile(t, filepath.Join(receiver, "delete.txt"), "current local work\n")
+		applyFrom(t, receiver, packagePath, false)
+		if after := git(t, receiver, "stash", "list", "--format=%H"); after != before {
+			t.Fatalf("user stash changed: before %q after %q", before, after)
+		}
+		assertFile(t, filepath.Join(receiver, "app.txt"), "sender\n")
+		assertFile(t, filepath.Join(receiver, "delete.txt"), "current local work\n")
 	})
 
 	t.Run("stash conflict can continue without a commit", func(t *testing.T) {
@@ -244,7 +371,7 @@ func clonePair(t *testing.T) (string, string) {
 	origin := filepath.Join(root, "origin.git")
 	git(t, root, "init", "--bare", origin)
 	seed := filepath.Join(root, "seed")
-	git(t, root, "clone", origin, seed)
+	git(t, root, "-c", "core.autocrlf=false", "clone", origin, seed)
 	configureGit(t, seed)
 	writeFile(t, filepath.Join(seed, "app.txt"), "base\n")
 	writeFile(t, filepath.Join(seed, "delete.txt"), "delete me\n")
@@ -254,8 +381,8 @@ func clonePair(t *testing.T) (string, string) {
 	git(t, origin, "symbolic-ref", "HEAD", "refs/heads/main")
 	sender := filepath.Join(root, "sender")
 	receiver := filepath.Join(root, "receiver")
-	git(t, root, "clone", origin, sender)
-	git(t, root, "clone", origin, receiver)
+	git(t, root, "-c", "core.autocrlf=false", "clone", origin, sender)
+	git(t, root, "-c", "core.autocrlf=false", "clone", origin, receiver)
 	configureGit(t, sender)
 	configureGit(t, receiver)
 	return sender, receiver
@@ -265,6 +392,7 @@ func configureGit(t *testing.T, dir string) {
 	t.Helper()
 	git(t, dir, "config", "user.name", "Handoff Test")
 	git(t, dir, "config", "user.email", "handoff@example.test")
+	git(t, dir, "config", "core.autocrlf", "false")
 }
 
 func buildFrom(t *testing.T, sender string, paths []string) string {
@@ -312,11 +440,14 @@ func git(t *testing.T, dir string, args ...string) string {
 	command := exec.Command("git", args...)
 	command.Dir = dir
 	command.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
-	output, err := command.CombinedOutput()
+	var stdout, stderr bytes.Buffer
+	command.Stdout = &stdout
+	command.Stderr = &stderr
+	err := command.Run()
 	if err != nil {
-		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, output)
+		t.Fatalf("git %s: %v\n%s%s", strings.Join(args, " "), err, stderr.String(), stdout.String())
 	}
-	return strings.TrimSpace(string(output))
+	return strings.TrimSpace(stdout.String())
 }
 
 func writeFile(t *testing.T, path, content string) {

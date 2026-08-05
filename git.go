@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"os/user"
+	pathpkg "path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -23,12 +24,14 @@ type handoffState struct {
 	IncomingRef    string `json:"incoming_ref"`
 	IncomingCommit string `json:"incoming_commit"`
 	StashHash      string `json:"stash_hash,omitempty"`
+	PrivateBackup  bool   `json:"private_backup,omitempty"`
 	Phase          string `json:"phase"`
 }
 
 const (
 	phasePrepare  = "prepare"
 	phaseIncoming = "incoming"
+	phaseRestore  = "restore"
 	phaseStash    = "stash"
 	phaseFinalize = "finalize"
 )
@@ -157,12 +160,15 @@ func applyHandoffPackage(id, packagePath, tmpDir string, stdout io.Writer) error
 		return fmt.Errorf("bundle verification failed: %w", err)
 	}
 	incomingRef := "refs/handoff/incoming/" + id
+	localBackupRef := backupRef(id)
 	defer func() {
 		if _, err := os.Stat(stateFile); errors.Is(err, os.ErrNotExist) {
 			_, _ = gitOutput(root, nil, "update-ref", "-d", incomingRef)
+			_, _ = gitOutput(root, nil, "update-ref", "-d", localBackupRef)
 		}
 	}()
 	_, _ = gitOutput(root, nil, "update-ref", "-d", incomingRef)
+	_, _ = gitOutput(root, nil, "update-ref", "-d", localBackupRef)
 	refspec := metadata.Ref + ":" + incomingRef
 	if _, err := gitOutput(root, nil, "fetch", "--quiet", "--no-tags", bundlePath, refspec); err != nil {
 		return fmt.Errorf("import bundle: %w", err)
@@ -186,26 +192,32 @@ func applyHandoffPackage(id, packagePath, tmpDir string, stdout io.Writer) error
 		return err
 	}
 
-	dirty, err := worktreeDirty(root)
+	dirty, err := trackedWorktreeDirty(root)
 	if err != nil {
 		removeState(stateFile)
 		return err
 	}
 	if dirty {
-		before, _ := gitOutput(root, nil, "rev-parse", "-q", "--verify", "refs/stash")
-		if _, err := gitOutput(root, nil, "stash", "push", "--include-untracked", "--message", "handoff backup "+id); err != nil {
+		backupHash, err := gitOutput(root, nil, "stash", "create", "handoff backup "+id)
+		if err != nil {
 			removeState(stateFile)
 			return fmt.Errorf("backup local changes: %w", err)
 		}
-		after, err := gitOutput(root, nil, "rev-parse", "refs/stash")
-		if err != nil || after == before {
+		if backupHash == "" {
 			removeState(stateFile)
 			return errors.New("Git did not create the local backup stash")
 		}
-		state.StashHash = after
+		if _, err := gitOutput(root, nil, "update-ref", localBackupRef, backupHash); err != nil {
+			removeState(stateFile)
+			return fmt.Errorf("protect local backup: %w", err)
+		}
+		state.StashHash = backupHash
+		state.PrivateBackup = true
 		if err := saveState(stateFile, state); err != nil {
-			_, _ = gitOutput(root, nil, "stash", "apply", "--index", after)
 			return err
+		}
+		if _, err := gitOutput(root, nil, "reset", "--hard", originalHead); err != nil {
+			return fmt.Errorf("prepare working tree: %w; local backup kept, stop processes using repository files and run 'handoff abort %s'", err, id)
 		}
 	}
 
@@ -217,7 +229,9 @@ func applyHandoffPackage(id, packagePath, tmpDir string, stdout io.Writer) error
 		if hasUnmerged(root) {
 			return conflictError(id, "incoming handoff")
 		}
-		_ = restoreOriginal(root, state, stateFile)
+		if restoreErr := restoreOriginal(root, state, stateFile); restoreErr != nil {
+			return fmt.Errorf("apply incoming changes: %v; restore local state: %w", err, restoreErr)
+		}
 		return fmt.Errorf("apply incoming changes: %w", err)
 	}
 	if err := makeTemporaryHead(root, state); err != nil {
@@ -254,8 +268,10 @@ func continueHandoff(id string, stdout io.Writer) error {
 		if err := applyLocalBackup(root, &state, stateFile); err != nil {
 			return err
 		}
+	case phaseRestore:
+		return fmt.Errorf("local backup restore did not complete; run 'handoff abort %s' and retry the pull", id)
 	case phaseStash:
-		if err := dropStash(root, state.StashHash); err != nil {
+		if err := releaseBackup(root, state); err != nil {
 			return err
 		}
 		if err := finalizeApplied(root, &state, stateFile); err != nil {
@@ -318,17 +334,25 @@ func makeTemporaryHead(root string, state handoffState) error {
 
 func applyLocalBackup(root string, state *handoffState, stateFile string) error {
 	if state.StashHash != "" {
-		state.Phase = phaseStash
+		state.Phase = phaseRestore
 		if err := saveState(stateFile, *state); err != nil {
 			return err
 		}
 		if _, err := gitOutput(root, nil, "stash", "apply", "--index", state.StashHash); err != nil {
 			if hasUnmerged(root) {
+				state.Phase = phaseStash
+				if saveErr := saveState(stateFile, *state); saveErr != nil {
+					return fmt.Errorf("save conflict recovery state: %w", saveErr)
+				}
 				return conflictError(state.ID, "restored local work")
 			}
-			return fmt.Errorf("restore local backup: %w (backup kept as %s)", err, shortID(state.StashHash))
+			return fmt.Errorf("restore local backup: %w (backup kept as %s; run 'handoff abort %s')", err, shortID(state.StashHash), state.ID)
 		}
-		if err := dropStash(root, state.StashHash); err != nil {
+		state.Phase = phaseStash
+		if err := saveState(stateFile, *state); err != nil {
+			return err
+		}
+		if err := releaseBackup(root, *state); err != nil {
 			return err
 		}
 	}
@@ -348,6 +372,10 @@ func finalizeApplied(root string, state *handoffState, stateFile string) error {
 }
 
 func restoreOriginal(root string, state handoffState, stateFile string) error {
+	if state.Phase == phasePrepare && state.StashHash == "" {
+		finishHandoff(root, state, stateFile)
+		return nil
+	}
 	_, _ = gitOutput(root, nil, "cherry-pick", "--abort")
 	if _, err := gitOutput(root, nil, "reset", "--hard", state.OriginalHead); err != nil {
 		return fmt.Errorf("restore original HEAD: %w", err)
@@ -356,7 +384,7 @@ func restoreOriginal(root string, state handoffState, stateFile string) error {
 		if _, err := gitOutput(root, nil, "stash", "apply", "--index", state.StashHash); err != nil {
 			return fmt.Errorf("restore local backup: %w (backup kept as %s)", err, shortID(state.StashHash))
 		}
-		if err := dropStash(root, state.StashHash); err != nil {
+		if err := releaseBackup(root, state); err != nil {
 			return err
 		}
 	}
@@ -366,7 +394,12 @@ func restoreOriginal(root string, state handoffState, stateFile string) error {
 
 func finishHandoff(root string, state handoffState, stateFile string) {
 	_, _ = gitOutput(root, nil, "update-ref", "-d", state.IncomingRef)
+	_, _ = gitOutput(root, nil, "update-ref", "-d", backupRef(state.ID))
 	removeState(stateFile)
+}
+
+func backupRef(id string) string {
+	return "refs/handoff/backups/" + id
 }
 
 func conflictError(id, stage string) error {
@@ -432,13 +465,13 @@ func hasUnmerged(root string) bool {
 	return err == nil && output != ""
 }
 
-func worktreeDirty(root string) (bool, error) {
-	output, err := gitOutputRaw(root, nil, nil, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+func trackedWorktreeDirty(root string) (bool, error) {
+	output, err := gitOutputRaw(root, nil, nil, "status", "--porcelain=v1", "-z", "--untracked-files=no")
 	return output != "", err
 }
 
-func dropStash(root, hash string) error {
-	if hash == "" {
+func releaseBackup(root string, state handoffState) error {
+	if state.StashHash == "" || state.PrivateBackup {
 		return nil
 	}
 	output, err := gitOutput(root, nil, "stash", "list", "--format=%H %gd")
@@ -447,12 +480,12 @@ func dropStash(root, hash string) error {
 	}
 	for _, line := range strings.Split(output, "\n") {
 		fields := strings.Fields(line)
-		if len(fields) == 2 && fields[0] == hash {
+		if len(fields) == 2 && fields[0] == state.StashHash {
 			_, err := gitOutput(root, nil, "stash", "drop", fields[1])
 			return err
 		}
 	}
-	return fmt.Errorf("backup stash %s was not found; it was not deleted", shortID(hash))
+	return nil
 }
 
 func normalizePathspecs(root string, paths []string) ([]string, error) {
@@ -460,15 +493,20 @@ func normalizePathspecs(root string, paths []string) ([]string, error) {
 		return []string{"."}, nil
 	}
 	result := make([]string, 0, len(paths))
-	workingDir, err := os.Getwd()
+	prefix, err := gitOutput("", nil, "rev-parse", "--show-prefix")
 	if err != nil {
 		return nil, err
 	}
 	for _, path := range paths {
-		absolute := path
 		if !filepath.IsAbs(path) {
-			absolute = filepath.Join(workingDir, path)
+			relative := pathpkg.Clean(pathpkg.Join(prefix, filepath.ToSlash(path)))
+			if relative == ".." || strings.HasPrefix(relative, "../") {
+				return nil, fmt.Errorf("path %q is outside the repository", path)
+			}
+			result = append(result, relative)
+			continue
 		}
+		absolute := path
 		relative, err := filepath.Rel(root, filepath.Clean(absolute))
 		if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
 			return nil, fmt.Errorf("path %q is outside the repository", path)
