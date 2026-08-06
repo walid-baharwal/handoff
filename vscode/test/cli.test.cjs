@@ -44,10 +44,26 @@ test("honors an explicit development binary path", () => {
 });
 
 test("adds JSON mode and parses a successful command", async () => {
+  let invocation;
   const result = await runHandoff("handoff", ["list"], {
-    spawnCommand: fakeSpawn({ stdout: JSON.stringify({ schema_version: 1, command: "list", data: { handoffs: [] } }) })
+    spawnCommand(binary, args, options) {
+      invocation = { binary, args };
+      return fakeSpawn({ stdout: JSON.stringify({ schema_version: 1, command: "list", data: { handoffs: [] } }) })(binary, args, options);
+    }
   });
   assert.deepEqual(result.data.handoffs, []);
+  assert.deepEqual(invocation.args, ["list", "--json"]);
+});
+
+test("places JSON mode before positional arguments", async () => {
+  let invocation;
+  await runHandoff("handoff", ["inspect", "abcdef123456"], {
+    spawnCommand(binary, args, options) {
+      invocation = { binary, args };
+      return fakeSpawn({ stdout: JSON.stringify({ schema_version: 1, command: "inspect", data: {} }) })(binary, args, options);
+    }
+  });
+  assert.deepEqual(invocation.args, ["inspect", "--json", "abcdef123456"]);
 });
 
 test("surfaces structured CLI failures", async () => {

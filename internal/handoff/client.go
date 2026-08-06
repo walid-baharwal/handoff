@@ -304,6 +304,9 @@ func runPull(args []string, stdin io.Reader, stdout io.Writer) error {
 	if len(fs.Args()) == 1 && !idPattern.MatchString(strings.ToLower(fs.Args()[0])) {
 		return invalidArguments("usage: handoff pull [--dry-run] [--yes] [--json] [ID]")
 	}
+	if *jsonOutput && !*dryRun && !*yes {
+		return invalidArguments("--yes is required when applying a handoff with --json")
+	}
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
@@ -337,13 +340,9 @@ func runPull(args []string, stdin io.Reader, stdout io.Writer) error {
 		}
 	} else {
 		id = strings.ToLower(fs.Args()[0])
-		if *jsonOutput {
-			selected, err = getHandoffMetadata(cfg, id)
-			if err != nil {
-				return err
-			}
-		} else {
-			selected, _ = getHandoffMetadata(cfg, id)
+		selected, err = getHandoffMetadata(cfg, id)
+		if err != nil {
+			return err
 		}
 	}
 	if selected.ID != "" && !*jsonOutput {
@@ -370,7 +369,7 @@ func runPull(args []string, stdin io.Reader, stdout io.Writer) error {
 		fmt.Fprintln(stdout, "\nDry run complete; no files were changed.")
 		return nil
 	}
-	if interactive && !*yes {
+	if !*yes {
 		confirmed, err := confirmPull(input, stdout)
 		if err != nil {
 			return err

@@ -33,6 +33,12 @@
   "extensionKind": [
     "workspace"
   ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "Handoff runs Git commands and changes files in the current repository."
+    }
+  },
   "activationEvents": [],
   "contributes": {
     "commands": [
@@ -70,6 +76,7 @@
       "properties": {
         "handoff.binaryPath": {
           "type": "string",
+          "scope": "machine",
           "default": "",
           "markdownDescription": "Optional path to a Handoff binary. Leave empty to use the binary bundled with this extension."
         }

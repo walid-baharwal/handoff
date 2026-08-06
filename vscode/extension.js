@@ -9,12 +9,17 @@ const {
 
 const tokenSecretKey = "handoff.teamToken";
 
-function workspaceRoot() {
-  const folder = vscode.workspace.workspaceFolders?.[0];
-  if (!folder) {
+async function workspaceRoot() {
+  const folders = vscode.workspace.workspaceFolders || [];
+  if (folders.length === 0) {
     throw new HandoffCommandError("Open a Git repository folder before using Handoff.", { code: "repository_required" });
   }
-  return folder.uri.fsPath;
+  if (folders.length === 1) return folders[0].uri.fsPath;
+  const selected = await vscode.window.showQuickPick(
+    folders.map((folder) => ({ label: folder.name, description: folder.uri.fsPath, folder })),
+    { placeHolder: "Select the repository for this Handoff command" }
+  );
+  return selected?.folder.uri.fsPath;
 }
 
 function getBinary(context) {
@@ -58,8 +63,8 @@ async function configure(context) {
   vscode.window.showInformationMessage("Handoff server configured.");
 }
 
-async function chooseInbox(context) {
-  const result = await execute(context, ["list"], { cwd: workspaceRoot() });
+async function chooseInbox(context, cwd) {
+  const result = await execute(context, ["list"], { cwd });
   const handoffs = result.data.handoffs;
   if (handoffs.length === 0) {
     vscode.window.showInformationMessage("No Handoffs are available for this repository.");
@@ -73,31 +78,35 @@ async function chooseInbox(context) {
   })), { placeHolder: "Select a Handoff" });
 }
 
-async function pull(context, id) {
-  const result = await execute(context, ["pull", id], { cwd: workspaceRoot() });
+async function pull(context, id, cwd) {
+  const result = await execute(context, ["pull", "--yes", id], { cwd });
   vscode.window.showInformationMessage(`Handoff ${result.data.handoff.id} applied as local, uncommitted changes.`);
 }
 
 async function openInbox(context) {
-  const choice = await chooseInbox(context);
+  const cwd = await workspaceRoot();
+  if (!cwd) return;
+  const choice = await chooseInbox(context, cwd);
   if (!choice) return;
-  const inspected = await execute(context, ["inspect", choice.handoff.id], { cwd: workspaceRoot() });
+  const inspected = await execute(context, ["inspect", choice.handoff.id], { cwd });
   const handoff = inspected.data.handoff;
   const action = await vscode.window.showInformationMessage(
     `${handoff.author || "Unknown sender"}: ${handoff.message || "Handoff changes"} (${handoff.file_count} files)`,
     "Pull"
   );
-  if (action === "Pull") await pull(context, handoff.id);
+  if (action === "Pull") await pull(context, handoff.id, cwd);
 }
 
 async function pushChanges(context) {
+  const cwd = await workspaceRoot();
+  if (!cwd) return;
   const message = await vscode.window.showInputBox({
     prompt: "Describe the changes to share",
     placeHolder: "Backend invoice changes",
     ignoreFocusOut: true
   });
   if (message === undefined) return;
-  const preview = await execute(context, ["push", "--dry-run", "-m", message], { cwd: workspaceRoot() });
+  const preview = await execute(context, ["push", "--dry-run", "-m", message], { cwd });
   const handoff = preview.data.handoff;
   const confirmation = await vscode.window.showInformationMessage(
     `Share ${handoff.file_count} changed file${handoff.file_count === 1 ? "" : "s"}?`,
@@ -105,11 +114,13 @@ async function pushChanges(context) {
     "Push Changes"
   );
   if (confirmation !== "Push Changes") return;
-  const result = await execute(context, ["push", "-m", message], { cwd: workspaceRoot() });
+  const result = await execute(context, ["push", "-m", message], { cwd });
   vscode.window.showInformationMessage(`Handoff uploaded: ${result.data.handoff.id}`);
 }
 
 async function pullHandoff(context) {
+  const cwd = await workspaceRoot();
+  if (!cwd) return;
   const id = await vscode.window.showInputBox({
     prompt: "Handoff ID to pull",
     placeHolder: "abcdef123456",
@@ -117,11 +128,20 @@ async function pullHandoff(context) {
     validateInput: (value) => /^[0-9a-f]{12}$/i.test(value) ? undefined : "Enter a 12-character Handoff ID."
   });
   if (!id) return;
-  await pull(context, id);
+  const inspected = await execute(context, ["inspect", id], { cwd });
+  const handoff = inspected.data.handoff;
+  const confirmation = await vscode.window.showWarningMessage(
+    `Apply Handoff ${id} from ${handoff.author || "unknown sender"} (${handoff.file_count} files)?`,
+    { modal: true },
+    "Pull"
+  );
+  if (confirmation === "Pull") await pull(context, id, cwd);
 }
 
 async function showRecovery(context) {
-  const result = await execute(context, ["status"], { cwd: workspaceRoot() });
+  const cwd = await workspaceRoot();
+  if (!cwd) return;
+  const result = await execute(context, ["status"], { cwd });
   const recovery = result.data.recovery;
   if (!recovery.active) {
     vscode.window.showInformationMessage("No Handoff recovery is active.");
@@ -133,12 +153,12 @@ async function showRecovery(context) {
     `Handoff ${recovery.handoff_id}: ${recovery.stage.replaceAll("_", " ")}${recovery.conflicted_files.length ? ` (${recovery.conflicted_files.join(", ")})` : ""}`,
     ...actions
   );
-  if (selected === "Continue Recovery") await continueRecovery(context, recovery.handoff_id);
-  if (selected === "Abort Recovery") await abortRecovery(context, recovery.handoff_id);
+  if (selected === "Continue Recovery") await continueRecovery(context, recovery.handoff_id, cwd);
+  if (selected === "Abort Recovery") await abortRecovery(context, recovery.handoff_id, cwd);
 }
 
-async function recoveryID(context) {
-  const result = await execute(context, ["status"], { cwd: workspaceRoot() });
+async function recoveryID(context, cwd) {
+  const result = await execute(context, ["status"], { cwd });
   if (!result.data.recovery.active) {
     vscode.window.showInformationMessage("No Handoff recovery is active.");
     return undefined;
@@ -146,15 +166,19 @@ async function recoveryID(context) {
   return result.data.recovery.handoff_id;
 }
 
-async function continueRecovery(context, knownID) {
-  const id = knownID || await recoveryID(context);
+async function continueRecovery(context, knownID, knownCwd) {
+  const cwd = knownCwd || await workspaceRoot();
+  if (!cwd) return;
+  const id = knownID || await recoveryID(context, cwd);
   if (!id) return;
-  await execute(context, ["continue", id], { cwd: workspaceRoot(), json: false });
+  await execute(context, ["continue", id], { cwd, json: false });
   vscode.window.showInformationMessage(`Handoff ${id} recovery completed.`);
 }
 
-async function abortRecovery(context, knownID) {
-  const id = knownID || await recoveryID(context);
+async function abortRecovery(context, knownID, knownCwd) {
+  const cwd = knownCwd || await workspaceRoot();
+  if (!cwd) return;
+  const id = knownID || await recoveryID(context, cwd);
   if (!id) return;
   const confirmation = await vscode.window.showWarningMessage(
     `Abort Handoff ${id} and restore the original local state?`,
@@ -162,7 +186,7 @@ async function abortRecovery(context, knownID) {
     "Abort Recovery"
   );
   if (confirmation !== "Abort Recovery") return;
-  await execute(context, ["abort", id], { cwd: workspaceRoot(), json: false });
+  await execute(context, ["abort", id], { cwd, json: false });
   vscode.window.showInformationMessage(`Handoff ${id} was aborted and local changes were restored.`);
 }
 

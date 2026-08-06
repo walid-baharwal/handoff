@@ -8,7 +8,7 @@ system and exposes it as the `handoff` command. It does not contain a separate
 JavaScript implementation.
 
 ```bash
-npm install --global @walid-baharwal/handoff
+npm install -g @walid-baharwal/handoff
 handoff setup --server https://handoff.example.com
 handoff version
 ```

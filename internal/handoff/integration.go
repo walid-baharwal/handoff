@@ -211,16 +211,23 @@ func currentRecoveryStatus() (recoveryStatus, error) {
 	if err != nil {
 		return recoveryStatus{}, commandError("recovery_state_invalid", err)
 	}
+	if err := validateStateObjects(root, state, false); err != nil {
+		return recoveryStatus{}, err
+	}
 	conflicted, err := conflictedPaths(root)
 	if err != nil {
 		return recoveryStatus{}, err
+	}
+	canContinue := len(conflicted) == 0 && canContinuePhase(state.Phase)
+	if canContinue && state.Phase == phaseIncoming {
+		canContinue = validateStateObjects(root, state, true) == nil
 	}
 	return recoveryStatus{
 		Active:          true,
 		HandoffID:       state.ID,
 		Stage:           integrationRecoveryStage(state.Phase),
 		ConflictedFiles: conflicted,
-		CanContinue:     len(conflicted) == 0 && canContinuePhase(state.Phase),
+		CanContinue:     canContinue,
 		CanAbort:        true,
 	}, nil
 }

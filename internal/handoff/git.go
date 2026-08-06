@@ -1,6 +1,7 @@
 package handoff
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -15,8 +16,10 @@ import (
 	pathpkg "path"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 type handoffState struct {
@@ -24,17 +27,21 @@ type handoffState struct {
 	OriginalHead   string `json:"original_head"`
 	IncomingRef    string `json:"incoming_ref"`
 	IncomingCommit string `json:"incoming_commit"`
+	TemporaryHead  string `json:"temporary_head,omitempty"`
 	StashHash      string `json:"stash_hash,omitempty"`
 	PrivateBackup  bool   `json:"private_backup,omitempty"`
 	Phase          string `json:"phase"`
 }
 
 const (
-	phasePrepare  = "prepare"
-	phaseIncoming = "incoming"
-	phaseRestore  = "restore"
-	phaseStash    = "stash"
-	phaseFinalize = "finalize"
+	phasePrepare         = "prepare"
+	phaseIncoming        = "incoming"
+	phaseRestore         = "restore"
+	phaseStash           = "stash"
+	phaseFinalize        = "finalize"
+	maxIncomingPaths     = 10_000
+	maxIncomingDiffBytes = 48 << 20
+	maxIncomingPathBytes = 4096
 )
 
 type pushMode string
@@ -58,6 +65,11 @@ func buildHandoffPackage(packagePath, message string, paths []string) (manifest,
 }
 
 func buildHandoffPackageFromPaths(root, packagePath, message string, paths []string, mode pushMode) (manifest, error) {
+	releaseLock, err := acquireOperationLock(root)
+	if err != nil {
+		return manifest{}, err
+	}
+	defer releaseLock()
 	if err := ensureNoOperation(root); err != nil {
 		return manifest{}, err
 	}
@@ -80,7 +92,7 @@ func buildHandoffPackageFromPaths(root, packagePath, message string, paths []str
 	}
 	defer os.RemoveAll(tmpDir)
 	indexPath := filepath.Join(tmpDir, "index")
-	gitEnv := append(os.Environ(), "GIT_INDEX_FILE="+indexPath, "GIT_LITERAL_PATHSPECS=1")
+	gitEnv := gitEnvironment("GIT_INDEX_FILE="+indexPath, "GIT_LITERAL_PATHSPECS=1")
 	if _, err := gitOutput(root, gitEnv, "read-tree", "HEAD"); err != nil {
 		return manifest{}, err
 	}
@@ -120,6 +132,17 @@ func buildHandoffPackageFromPaths(root, packagePath, message string, paths []str
 		return manifest{}, err
 	}
 	changed := splitNUL(changedOutput)
+	if len(changed) > maxIncomingPaths {
+		return manifest{}, fmt.Errorf("handoff changes more than %d paths", maxIncomingPaths)
+	}
+	for _, path := range changed {
+		if len(path) > maxIncomingPathBytes {
+			return manifest{}, fmt.Errorf("handoff path exceeds %d bytes", maxIncomingPathBytes)
+		}
+		if !utf8.ValidString(path) {
+			return manifest{}, fmt.Errorf("handoff path %q is not valid UTF-8", path)
+		}
+	}
 	if err := rejectUnsupportedPaths(root, gitEnv, changed); err != nil {
 		return manifest{}, err
 	}
@@ -147,6 +170,13 @@ func buildHandoffPackageFromPaths(root, packagePath, message string, paths []str
 		return manifest{}, err
 	}
 	commit = strings.TrimSpace(commit)
+	_, objects, err := inspectIncomingChanges(root, nil, base, commit)
+	if err != nil {
+		return manifest{}, fmt.Errorf("inspect outgoing paths: %w", err)
+	}
+	if err := enforceExpandedSize(root, nil, objects, defaultMaxBytes); err != nil {
+		return manifest{}, err
+	}
 	random, err := randomHex(8)
 	if err != nil {
 		return manifest{}, err
@@ -265,7 +295,7 @@ func changedPaths(root string, mode pushMode, pathspecs []string) ([]string, err
 }
 
 func literalPathEnv() []string {
-	return append(os.Environ(), "GIT_LITERAL_PATHSPECS=1")
+	return gitEnvironment("GIT_LITERAL_PATHSPECS=1")
 }
 
 func applyHandoffPackage(id, packagePath, tmpDir string, stdout io.Writer) error {
@@ -273,6 +303,11 @@ func applyHandoffPackage(id, packagePath, tmpDir string, stdout io.Writer) error
 	if err != nil {
 		return err
 	}
+	releaseLock, err := acquireOperationLock(root)
+	if err != nil {
+		return err
+	}
+	defer releaseLock()
 	if err := ensureNoOperation(root); err != nil {
 		return err
 	}
@@ -292,23 +327,67 @@ func applyHandoffPackage(id, packagePath, tmpDir string, stdout io.Writer) error
 	if _, err := gitOutput(root, nil, "bundle", "verify", bundlePath); err != nil {
 		return fmt.Errorf("bundle verification failed: %w", err)
 	}
+	validationRoot := filepath.Join(tmpDir, "validation.git")
+	if err := os.Mkdir(validationRoot, 0o700); err != nil {
+		return err
+	}
+	if _, err := gitOutput(validationRoot, nil, "init", "--bare", "."); err != nil {
+		return fmt.Errorf("initialize bundle validation: %w", err)
+	}
+	objectDir, err := gitOutput(root, nil, "rev-parse", "--path-format=absolute", "--git-path", "objects")
+	if err != nil {
+		return fmt.Errorf("locate repository objects: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(validationRoot, "objects", "info", "alternates"), []byte(strconv.Quote(objectDir)+"\n"), 0o600); err != nil {
+		return fmt.Errorf("configure bundle validation: %w", err)
+	}
 	incomingRef := "refs/handoff/incoming/" + id
 	localBackupRef := backupRef(id)
+	localTemporaryRef := temporaryRef(id)
 	defer func() {
 		if _, err := os.Stat(stateFile); errors.Is(err, os.ErrNotExist) {
 			_, _ = gitOutput(root, nil, "update-ref", "-d", incomingRef)
 			_, _ = gitOutput(root, nil, "update-ref", "-d", localBackupRef)
+			_, _ = gitOutput(root, nil, "update-ref", "-d", localTemporaryRef)
 		}
 	}()
-	_, _ = gitOutput(root, nil, "update-ref", "-d", incomingRef)
-	_, _ = gitOutput(root, nil, "update-ref", "-d", localBackupRef)
 	refspec := metadata.Ref + ":" + incomingRef
-	if _, err := gitOutput(root, nil, "fetch", "--quiet", "--no-tags", bundlePath, refspec); err != nil {
-		return fmt.Errorf("import bundle: %w", err)
+	if _, err := gitOutput(validationRoot, nil, "fetch", "--quiet", "--no-tags", bundlePath, refspec); err != nil {
+		return fmt.Errorf("validate bundle import: %w", err)
 	}
-	actualCommit, err := gitOutput(root, nil, "rev-parse", incomingRef)
+	actualCommit, err := gitOutput(validationRoot, nil, "rev-parse", incomingRef)
 	if err != nil || actualCommit != metadata.Commit {
 		return errors.New("handoff bundle commit does not match its manifest")
+	}
+	if err := validateCommitParent(validationRoot, nil, metadata.Commit, metadata.BaseCommit); err != nil {
+		return err
+	}
+	incomingPaths, incomingObjects, err := inspectIncomingChanges(validationRoot, nil, metadata.BaseCommit, metadata.Commit)
+	if err != nil {
+		return fmt.Errorf("inspect incoming paths: %w", err)
+	}
+	if err := enforceExpandedSize(validationRoot, nil, incomingObjects, defaultMaxBytes); err != nil {
+		return err
+	}
+	if err := validateFileSummary(metadata, incomingPaths); err != nil {
+		return err
+	}
+	localChanged, err := changedWorktreePaths(root)
+	if err != nil {
+		return fmt.Errorf("inspect local changes: %w", err)
+	}
+	if err := rejectResetPathCollisions(root, localChanged); err != nil {
+		return err
+	}
+	protectedPaths := append(append([]string(nil), incomingPaths...), localChanged...)
+	if err := rejectLocalPathCollisions(root, protectedPaths); err != nil {
+		return err
+	}
+	_, _ = gitOutput(root, nil, "update-ref", "-d", incomingRef)
+	_, _ = gitOutput(root, nil, "update-ref", "-d", localBackupRef)
+	validatedRefspec := incomingRef + ":" + incomingRef
+	if _, err := gitOutput(root, nil, "fetch", "--quiet", "--no-tags", validationRoot, validatedRefspec); err != nil {
+		return fmt.Errorf("import validated bundle: %w", err)
 	}
 	originalHead, err := gitOutput(root, nil, "rev-parse", "HEAD")
 	if err != nil {
@@ -327,22 +406,18 @@ func applyHandoffPackage(id, packagePath, tmpDir string, stdout io.Writer) error
 
 	dirty, err := trackedWorktreeDirty(root)
 	if err != nil {
-		removeState(stateFile)
-		return err
+		return errors.Join(err, removeState(stateFile))
 	}
 	if dirty {
 		backupHash, err := gitOutput(root, nil, "stash", "create", "handoff backup "+id)
 		if err != nil {
-			removeState(stateFile)
-			return fmt.Errorf("backup local changes: %w", err)
+			return errors.Join(fmt.Errorf("backup local changes: %w", err), removeState(stateFile))
 		}
 		if backupHash == "" {
-			removeState(stateFile)
-			return errors.New("Git did not create the local backup stash")
+			return errors.Join(errors.New("Git did not create the local backup stash"), removeState(stateFile))
 		}
 		if _, err := gitOutput(root, nil, "update-ref", localBackupRef, backupHash); err != nil {
-			removeState(stateFile)
-			return fmt.Errorf("protect local backup: %w", err)
+			return errors.Join(fmt.Errorf("protect local backup: %w", err), removeState(stateFile))
 		}
 		state.StashHash = backupHash
 		state.PrivateBackup = true
@@ -367,7 +442,7 @@ func applyHandoffPackage(id, packagePath, tmpDir string, stdout io.Writer) error
 		}
 		return fmt.Errorf("apply incoming changes: %w", err)
 	}
-	if err := makeTemporaryHead(root, state); err != nil {
+	if err := makeTemporaryHead(root, &state, stateFile); err != nil {
 		return err
 	}
 	if err := applyLocalBackup(root, &state, stateFile); err != nil {
@@ -382,6 +457,11 @@ func continueHandoff(id string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
+	releaseLock, err := acquireOperationLock(root)
+	if err != nil {
+		return err
+	}
+	defer releaseLock()
 	stateFile := statePath(root)
 	state, err := loadState(stateFile)
 	if err != nil {
@@ -390,12 +470,15 @@ func continueHandoff(id string, stdout io.Writer) error {
 	if state.ID != id {
 		return commandError("active_handoff_mismatch", fmt.Errorf("active handoff is %s, not %s", state.ID, id))
 	}
+	if err := validateStateObjects(root, state, true); err != nil {
+		return err
+	}
 	if hasUnmerged(root) {
 		return commandError("conflicts_unresolved", errors.New("conflicts remain; resolve them and run 'git add' on each file before continuing"))
 	}
 	switch state.Phase {
 	case phaseIncoming:
-		if err := makeTemporaryHead(root, state); err != nil {
+		if err := makeTemporaryHead(root, &state, stateFile); err != nil {
 			return err
 		}
 		if err := applyLocalBackup(root, &state, stateFile); err != nil {
@@ -426,6 +509,11 @@ func abortHandoff(id string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
+	releaseLock, err := acquireOperationLock(root)
+	if err != nil {
+		return err
+	}
+	defer releaseLock()
 	stateFile := statePath(root)
 	state, err := loadState(stateFile)
 	if err != nil {
@@ -434,6 +522,9 @@ func abortHandoff(id string, stdout io.Writer) error {
 	if state.ID != id {
 		return commandError("active_handoff_mismatch", fmt.Errorf("active handoff is %s, not %s", state.ID, id))
 	}
+	if err := validateStateObjects(root, state, false); err != nil {
+		return err
+	}
 	if err := restoreOriginal(root, state, stateFile); err != nil {
 		return err
 	}
@@ -441,24 +532,43 @@ func abortHandoff(id string, stdout io.Writer) error {
 	return nil
 }
 
-func makeTemporaryHead(root string, state handoffState) error {
+func makeTemporaryHead(root string, state *handoffState, stateFile string) error {
 	tree, err := gitOutput(root, nil, "write-tree")
 	if err != nil {
 		return fmt.Errorf("write merged tree: %w", err)
 	}
-	name, email := gitIdentity(root)
-	env := append(os.Environ(),
-		"GIT_AUTHOR_NAME="+name,
-		"GIT_AUTHOR_EMAIL="+email,
-		"GIT_COMMITTER_NAME="+name,
-		"GIT_COMMITTER_EMAIL="+email,
-	)
-	commit, err := gitOutputRaw(root, env, strings.NewReader("Temporary Handoff "+state.ID+"\n"), "commit-tree", tree, "-p", state.OriginalHead)
-	if err != nil {
-		return fmt.Errorf("create temporary merge state: %w", err)
+	if state.TemporaryHead == "" {
+		name, email := gitIdentity(root)
+		env := gitEnvironment(
+			"GIT_AUTHOR_NAME="+name,
+			"GIT_AUTHOR_EMAIL="+email,
+			"GIT_COMMITTER_NAME="+name,
+			"GIT_COMMITTER_EMAIL="+email,
+		)
+		commit, err := gitOutputRaw(root, env, strings.NewReader("Temporary Handoff "+state.ID+"\n"), "commit-tree", tree, "-p", state.OriginalHead)
+		if err != nil {
+			return fmt.Errorf("create temporary merge state: %w", err)
+		}
+		state.TemporaryHead = strings.TrimSpace(commit)
+		if _, err := gitOutput(root, nil, "update-ref", temporaryRef(state.ID), state.TemporaryHead); err != nil {
+			return fmt.Errorf("protect temporary merge state: %w", err)
+		}
+		if err := saveState(stateFile, *state); err != nil {
+			return err
+		}
 	}
-	commit = strings.TrimSpace(commit)
-	if _, err := gitOutput(root, nil, "update-ref", "HEAD", commit, state.OriginalHead); err != nil {
+	currentHead, err := gitOutput(root, nil, "rev-parse", "HEAD")
+	if err != nil {
+		return err
+	}
+	if currentHead == state.TemporaryHead {
+		_, _ = gitOutput(root, nil, "cherry-pick", "--quit")
+		return nil
+	}
+	if currentHead != state.OriginalHead {
+		return commandError("recovery_state_invalid", errors.New("repository HEAD changed during Handoff recovery"))
+	}
+	if _, err := gitOutput(root, nil, "update-ref", "HEAD", state.TemporaryHead, state.OriginalHead); err != nil {
 		return fmt.Errorf("activate temporary merge state: %w", err)
 	}
 	_, _ = gitOutput(root, nil, "cherry-pick", "--quit")
@@ -500,14 +610,12 @@ func finalizeApplied(root string, state *handoffState, stateFile string) error {
 	if _, err := gitOutput(root, nil, "reset", "--mixed", state.OriginalHead); err != nil {
 		return fmt.Errorf("restore original HEAD: %w", err)
 	}
-	finishHandoff(root, *state, stateFile)
-	return nil
+	return finishHandoff(root, *state, stateFile)
 }
 
 func restoreOriginal(root string, state handoffState, stateFile string) error {
 	if state.Phase == phasePrepare && state.StashHash == "" {
-		finishHandoff(root, state, stateFile)
-		return nil
+		return finishHandoff(root, state, stateFile)
 	}
 	_, _ = gitOutput(root, nil, "cherry-pick", "--abort")
 	if _, err := gitOutput(root, nil, "reset", "--hard", state.OriginalHead); err != nil {
@@ -521,18 +629,25 @@ func restoreOriginal(root string, state handoffState, stateFile string) error {
 			return err
 		}
 	}
-	finishHandoff(root, state, stateFile)
-	return nil
+	return finishHandoff(root, state, stateFile)
 }
 
-func finishHandoff(root string, state handoffState, stateFile string) {
+func finishHandoff(root string, state handoffState, stateFile string) error {
+	if err := removeState(stateFile); err != nil {
+		return err
+	}
 	_, _ = gitOutput(root, nil, "update-ref", "-d", state.IncomingRef)
 	_, _ = gitOutput(root, nil, "update-ref", "-d", backupRef(state.ID))
-	removeState(stateFile)
+	_, _ = gitOutput(root, nil, "update-ref", "-d", temporaryRef(state.ID))
+	return nil
 }
 
 func backupRef(id string) string {
 	return "refs/handoff/backups/" + id
+}
+
+func temporaryRef(id string) string {
+	return "refs/handoff/temporary/" + id
 }
 
 func conflictError(id, stage string) error {
@@ -571,11 +686,87 @@ func loadState(path string) (handoffState, error) {
 	if err := json.Unmarshal(data, &state); err != nil {
 		return handoffState{}, errors.New("Handoff recovery state is corrupted")
 	}
+	if !idPattern.MatchString(state.ID) || !objectIDPattern.MatchString(state.OriginalHead) || !objectIDPattern.MatchString(state.IncomingCommit) {
+		return handoffState{}, errors.New("Handoff recovery state contains invalid identifiers")
+	}
+	if state.IncomingRef != "refs/handoff/incoming/"+state.ID || (state.StashHash != "" && !objectIDPattern.MatchString(state.StashHash)) || (state.TemporaryHead != "" && !objectIDPattern.MatchString(state.TemporaryHead)) {
+		return handoffState{}, errors.New("Handoff recovery state contains invalid references")
+	}
+	if state.PrivateBackup && state.StashHash == "" {
+		return handoffState{}, errors.New("Handoff recovery state contains an invalid backup")
+	}
+	switch state.Phase {
+	case phasePrepare, phaseIncoming, phaseRestore, phaseStash, phaseFinalize:
+	default:
+		return handoffState{}, errors.New("Handoff recovery state contains an invalid phase")
+	}
+	if (state.Phase == phaseRestore || state.Phase == phaseStash) && state.StashHash == "" {
+		return handoffState{}, errors.New("Handoff recovery state is missing its local backup")
+	}
 	return state, nil
 }
 
-func removeState(path string) {
-	_ = os.Remove(path)
+func validateStateObjects(root string, state handoffState, forContinue bool) error {
+	for name, object := range map[string]string{
+		"original HEAD": state.OriginalHead,
+		"local backup":  state.StashHash,
+	} {
+		if object == "" {
+			continue
+		}
+		if _, err := gitOutput(root, nil, "cat-file", "-e", object+"^{commit}"); err != nil {
+			return commandError("recovery_state_invalid", fmt.Errorf("Handoff recovery %s is missing or invalid", name))
+		}
+	}
+	if state.StashHash != "" {
+		line, err := gitOutput(root, nil, "rev-list", "--parents", "-n", "1", state.StashHash)
+		fields := strings.Fields(line)
+		if err != nil || len(fields) < 3 || fields[0] != state.StashHash || fields[1] != state.OriginalHead {
+			return commandError("recovery_state_invalid", errors.New("Handoff recovery local backup is not based on the original HEAD"))
+		}
+	}
+	if forContinue && state.Phase == phaseIncoming {
+		if state.TemporaryHead == "" {
+			if _, err := gitOutput(root, nil, "cat-file", "-e", state.IncomingCommit+"^{commit}"); err != nil {
+				return commandError("recovery_state_invalid", errors.New("Handoff recovery incoming commit is missing or invalid"))
+			}
+			incoming, err := gitOutput(root, nil, "rev-parse", state.IncomingRef)
+			if err != nil || incoming != state.IncomingCommit {
+				return commandError("recovery_state_invalid", errors.New("Handoff recovery incoming reference is missing or invalid"))
+			}
+		} else {
+			if err := validateCommitParent(root, nil, state.TemporaryHead, state.OriginalHead); err != nil {
+				return commandError("recovery_state_invalid", errors.New("Handoff recovery temporary HEAD is missing or invalid"))
+			}
+		}
+	}
+	return nil
+}
+
+func acquireOperationLock(root string) (func(), error) {
+	path, err := gitOutput(root, nil, "rev-parse", "--path-format=absolute", "--git-path", "handoff-operation.lock")
+	if err != nil {
+		return nil, err
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := lockFile(file); err != nil {
+		file.Close()
+		return nil, commandError("operation_active", errors.New("another Handoff command is already changing this repository"))
+	}
+	return func() {
+		_ = unlockFile(file)
+		_ = file.Close()
+	}, nil
+}
+
+func removeState(path string) error {
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return syncDirectory(filepath.Dir(path))
 }
 
 func ensureNoOperation(root string) error {
@@ -601,6 +792,260 @@ func hasUnmerged(root string) bool {
 func trackedWorktreeDirty(root string) (bool, error) {
 	output, err := gitOutputRaw(root, nil, nil, "status", "--porcelain=v1", "-z", "--untracked-files=no")
 	return output != "", err
+}
+
+func validateCommitParent(root string, env []string, commit, expectedParent string) error {
+	line, err := gitOutput(root, env, "rev-list", "--parents", "-n", "1", commit)
+	if err != nil {
+		return err
+	}
+	fields := strings.Fields(line)
+	if len(fields) != 2 || fields[0] != commit || fields[1] != expectedParent {
+		return errors.New("handoff commit must have the manifest base commit as its only parent")
+	}
+	return nil
+}
+
+func inspectIncomingChanges(root string, env []string, base, commit string) ([]string, []string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	command := exec.CommandContext(ctx, "git", "diff", "--raw", "--no-abbrev", "--no-renames", "-z", base, commit, "--")
+	command.Dir = root
+	if env == nil {
+		env = gitEnvironment()
+	}
+	command.Env = append(append([]string(nil), env...), "GIT_LITERAL_PATHSPECS=1", "GIT_TERMINAL_PROMPT=0")
+	stdout, err := command.StdoutPipe()
+	if err != nil {
+		return nil, nil, err
+	}
+	var stderr bytes.Buffer
+	command.Stderr = &stderr
+	if err := command.Start(); err != nil {
+		return nil, nil, err
+	}
+	reader := bufio.NewReader(stdout)
+	remaining := int64(maxIncomingDiffBytes)
+	paths := make([]string, 0)
+	objects := make([]string, 0)
+	for {
+		raw, readErr := readNULField(reader, &remaining, 512)
+		if errors.Is(readErr, io.EOF) {
+			break
+		}
+		if readErr != nil {
+			cancel()
+			_ = command.Wait()
+			return nil, nil, readErr
+		}
+		path, readErr := readNULField(reader, &remaining, maxIncomingPathBytes)
+		if readErr != nil {
+			cancel()
+			_ = command.Wait()
+			return nil, nil, errors.New("invalid or oversized path in raw Git diff")
+		}
+		if !utf8.ValidString(path) {
+			cancel()
+			_ = command.Wait()
+			return nil, nil, errors.New("incoming Git path is not valid UTF-8")
+		}
+		fields := strings.Fields(raw)
+		if len(fields) != 5 || !strings.HasPrefix(fields[0], ":") {
+			cancel()
+			_ = command.Wait()
+			return nil, nil, errors.New("invalid raw Git diff entry")
+		}
+		if len(paths) == maxIncomingPaths {
+			cancel()
+			_ = command.Wait()
+			return nil, nil, fmt.Errorf("handoff changes more than %d paths", maxIncomingPaths)
+		}
+		paths = append(paths, path)
+		newMode := fields[1]
+		if newMode == "160000" {
+			cancel()
+			_ = command.Wait()
+			return nil, nil, fmt.Errorf("submodule change %q is not supported in version 1", path)
+		}
+		if newMode != "000000" {
+			objects = append(objects, fields[3])
+		}
+	}
+	if err := command.Wait(); err != nil {
+		detail := strings.TrimSpace(stderr.String())
+		if detail == "" {
+			detail = err.Error()
+		}
+		return nil, nil, errors.New(detail)
+	}
+	return paths, objects, nil
+}
+
+func validateFileSummary(metadata manifest, paths []string) error {
+	if metadata.FileCount != len(paths) || metadata.FilesTruncated != (len(paths) > maxListedFiles) || len(metadata.Files) != min(len(paths), maxListedFiles) {
+		return errors.New("handoff file summary does not match its Git changes")
+	}
+	actual := make(map[string]struct{}, len(paths))
+	for _, path := range paths {
+		actual[path] = struct{}{}
+	}
+	seen := make(map[string]struct{}, len(metadata.Files))
+	for _, path := range metadata.Files {
+		if _, exists := actual[path]; !exists {
+			return errors.New("handoff file summary does not match its Git changes")
+		}
+		if _, duplicate := seen[path]; duplicate {
+			return errors.New("handoff file summary contains duplicate paths")
+		}
+		seen[path] = struct{}{}
+	}
+	return nil
+}
+
+func readNULField(reader *bufio.Reader, remaining *int64, maximum int) (string, error) {
+	var field []byte
+	for {
+		fragment, err := reader.ReadSlice(0)
+		*remaining -= int64(len(fragment))
+		if *remaining < 0 || len(field)+len(fragment) > maximum+1 {
+			return "", errors.New("incoming Git diff exceeds its safety limit")
+		}
+		field = append(field, fragment...)
+		if err == nil {
+			return string(field[:len(field)-1]), nil
+		}
+		if !errors.Is(err, bufio.ErrBufferFull) {
+			if errors.Is(err, io.EOF) && len(field) == 0 {
+				return "", io.EOF
+			}
+			return "", errors.New("unterminated raw Git diff entry")
+		}
+	}
+}
+
+func enforceExpandedSize(root string, env []string, objects []string, maximum int64) error {
+	if len(objects) == 0 {
+		return nil
+	}
+	input := strings.NewReader(strings.Join(objects, "\n") + "\n")
+	output, err := gitOutputRaw(root, env, input, "cat-file", "--batch-check=%(objecttype) %(objectsize)")
+	if err != nil {
+		return err
+	}
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	if len(lines) != len(objects) {
+		return errors.New("Git returned an incomplete incoming-object summary")
+	}
+	var total int64
+	for _, line := range lines {
+		fields := strings.Fields(line)
+		if len(fields) != 2 || fields[0] != "blob" {
+			return errors.New("handoff contains an invalid incoming object")
+		}
+		size, err := strconv.ParseInt(fields[1], 10, 64)
+		if err != nil || size < 0 || size > maximum-total {
+			return commandError("package_too_large", fmt.Errorf("incoming files exceed the local %s expanded-size limit", formatBytes(maximum)))
+		}
+		total += size
+	}
+	return nil
+}
+
+func changedWorktreePaths(root string) ([]string, error) {
+	output, err := gitOutputRaw(root, literalPathEnv(), nil, "diff", "--name-only", "--no-renames", "-z", "HEAD", "--")
+	if err != nil {
+		return nil, err
+	}
+	return splitNUL(output), nil
+}
+
+func rejectResetPathCollisions(root string, paths []string) error {
+	for _, path := range paths {
+		parts := strings.Split(filepath.FromSlash(path), string(filepath.Separator))
+		current := root
+		for index, part := range parts {
+			current = filepath.Join(current, part)
+			info, err := os.Lstat(current)
+			if errors.Is(err, os.ErrNotExist) {
+				break
+			}
+			if err != nil {
+				return err
+			}
+			if index < len(parts)-1 && !info.IsDir() {
+				return commandError("local_path_collision", fmt.Errorf("local path %q would be overwritten while resetting tracked path %q; move or back up the local path and retry", filepath.ToSlash(strings.Join(parts[:index+1], string(filepath.Separator))), path))
+			}
+			if index == len(parts)-1 && info.IsDir() {
+				return commandError("local_path_collision", fmt.Errorf("a local directory would be overwritten while resetting tracked path %q; move or back up the directory and retry", path))
+			}
+		}
+	}
+	return nil
+}
+
+func rejectLocalPathCollisions(root string, incoming []string) error {
+	ignoreCase := false
+	if value, err := gitOutput(root, nil, "config", "--bool", "core.ignoreCase"); err == nil {
+		ignoreCase = value == "true"
+	}
+	output, err := gitOutputRaw(root, nil, nil, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=matching")
+	if err != nil {
+		return err
+	}
+	localPaths := make([]string, 0)
+	for _, entry := range splitNUL(output) {
+		if len(entry) < 4 || (entry[:2] != "??" && entry[:2] != "!!") {
+			continue
+		}
+		local := strings.TrimSuffix(entry[3:], "/")
+		localPaths = append(localPaths, local)
+	}
+	if local, path, collided := findPathCollision(localPaths, incoming, ignoreCase); collided {
+		return commandError("local_path_collision", fmt.Errorf("local untracked or ignored path %q would be overwritten by incoming path %q; move or back up the local path and retry", local, path))
+	}
+	return nil
+}
+
+func findPathCollision(localPaths, incomingPaths []string, ignoreCase bool) (string, string, bool) {
+	key := func(path string) string {
+		if ignoreCase {
+			return strings.ToLower(path)
+		}
+		return path
+	}
+	parent := func(path string) string {
+		if index := strings.LastIndexByte(path, '/'); index >= 0 {
+			return path[:index]
+		}
+		return ""
+	}
+	localByKey := make(map[string]string, len(localPaths))
+	incomingByKey := make(map[string]string, len(incomingPaths))
+	for _, path := range localPaths {
+		localByKey[key(path)] = path
+	}
+	for _, path := range incomingPaths {
+		incomingByKey[key(path)] = path
+	}
+	for _, local := range localPaths {
+		localKey := key(local)
+		if incoming, exists := incomingByKey[localKey]; exists {
+			return local, incoming, true
+		}
+		for ancestor := parent(localKey); ancestor != ""; ancestor = parent(ancestor) {
+			if incoming, exists := incomingByKey[ancestor]; exists {
+				return local, incoming, true
+			}
+		}
+	}
+	for _, incoming := range incomingPaths {
+		for ancestor := parent(key(incoming)); ancestor != ""; ancestor = parent(ancestor) {
+			if local, exists := localByKey[ancestor]; exists {
+				return local, incoming, true
+			}
+		}
+	}
+	return "", "", false
 }
 
 func releaseBackup(root string, state handoffState) error {
@@ -719,7 +1164,7 @@ func gitOutputRaw(dir string, env []string, input io.Reader, args ...string) (st
 		command.Dir = dir
 	}
 	if env == nil {
-		env = os.Environ()
+		env = gitEnvironment()
 	}
 	command.Env = append(env, "GIT_TERMINAL_PROMPT=0")
 	command.Stdin = input
@@ -737,4 +1182,19 @@ func gitOutputRaw(dir string, env []string, input io.Reader, args ...string) (st
 		return "", errors.New(detail)
 	}
 	return stdout.String(), nil
+}
+
+// gitEnvironment prevents caller-controlled GIT_* variables from redirecting
+// commands to a different repository, worktree, object store, config, or Git
+// implementation. Handoff adds back only variables required by its operations.
+func gitEnvironment(overrides ...string) []string {
+	env := make([]string, 0, len(os.Environ())+len(overrides))
+	for _, entry := range os.Environ() {
+		name, _, _ := strings.Cut(entry, "=")
+		if strings.HasPrefix(strings.ToUpper(name), "GIT_") {
+			continue
+		}
+		env = append(env, entry)
+	}
+	return append(env, overrides...)
 }

@@ -64,9 +64,10 @@ function runHandoff(binary, args, options = {}) {
   const spawnCommand = options.spawnCommand || spawn;
   const cwd = options.cwd;
   const input = options.input;
-	const jsonOutput = options.json !== false;
+  const jsonOutput = options.json !== false;
   return new Promise((resolve, reject) => {
-    const child = spawnCommand(binary, jsonOutput ? [...args, "--json"] : args, {
+    const commandArgs = jsonOutput ? [args[0], "--json", ...args.slice(1)] : args;
+    const child = spawnCommand(binary, commandArgs, {
       cwd,
       windowsHide: true,
       stdio: [input === undefined ? "ignore" : "pipe", "pipe", "pipe"]
@@ -78,10 +79,10 @@ function runHandoff(binary, args, options = {}) {
     child.on("error", (error) => reject(new HandoffCommandError(error.message, { code: "spawn_failed" })));
     child.on("close", (exitCode) => {
       if (exitCode === 0) {
-		if (!jsonOutput) {
-			resolve(undefined);
-			return;
-		}
+        if (!jsonOutput) {
+          resolve(undefined);
+          return;
+        }
         try {
           resolve(parseJSON(stdout, "stdout"));
         } catch (error) {
@@ -89,10 +90,10 @@ function runHandoff(binary, args, options = {}) {
         }
         return;
       }
-		if (!jsonOutput) {
-			reject(new HandoffCommandError(stderr.trim() || "Handoff command failed.", { exitCode, stderr }));
-			return;
-		}
+      if (!jsonOutput) {
+        reject(new HandoffCommandError(stderr.trim() || "Handoff command failed.", { exitCode, stderr }));
+        return;
+      }
       let response;
       try {
         response = parseJSON(stderr, "stderr");

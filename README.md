@@ -23,6 +23,7 @@ handoff push  ── package ──> stores package ── ID ──────
 - Single binary for Linux, Windows, and macOS.
 - Filesystem storage: no database or repository integration.
 - 100 MB package limit and 30-day retention by default.
+- Receiver safety limits of 100 MB expanded changed-file content and 10,000 changed paths per handoff.
 
 Git LFS files and submodule changes are not supported in version 1.
 
@@ -34,7 +35,7 @@ If Node.js 18 or newer is installed, npm can install the official CLI and the
 correct native binary for the current platform:
 
 ```bash
-npm install --global @walid-baharwal/handoff
+npm install -g @walid-baharwal/handoff
 handoff version
 ```
 
@@ -42,8 +43,8 @@ This is the same Go application as the standalone download, not a separate
 JavaScript implementation. Upgrade or remove it with:
 
 ```bash
-npm install --global @walid-baharwal/handoff@latest
-npm uninstall --global @walid-baharwal/handoff
+npm install -g @walid-baharwal/handoff@latest
+npm uninstall -g @walid-baharwal/handoff
 ```
 
 ### Standalone binary
@@ -179,6 +180,8 @@ An ID can still be applied directly:
 handoff pull abcdef123456
 ```
 
+Direct pulls also require confirmation. Trusted automation can pass `--yes` explicitly.
+
 Preview metadata without applying the handoff, or remove a handoff from the inbox:
 
 ```bash
@@ -271,9 +274,13 @@ The Compose volume `handoff_data` keeps uploaded packages across restarts.
 | `HANDOFF_DATA_DIR` | `/data` | Package storage directory |
 | `HANDOFF_DOWNLOAD_DIR` | `/downloads` | Client binary download directory |
 | `HANDOFF_MAX_BYTES` | `104857600` | Maximum package size |
+| `HANDOFF_MAX_STORAGE_BYTES` | `10737418240` | Maximum total stored package bytes |
+| `HANDOFF_MAX_UPLOADS` | `4` | Maximum concurrent package uploads |
 | `HANDOFF_RETENTION` | `720h` | Package retention period |
 
 Packages are protected in transit by HTTPS and access-controlled by the shared token. They are not encrypted on disk; anyone with server filesystem access can read them.
+
+Use a dedicated, access-controlled directory for `HANDOFF_DATA_DIR`; do not point it at a repository, home directory, temporary directory shared with other users, or another application's data. Handoff creates, expires, and deletes files within this directory as part of normal operation.
 
 ## Project structure
 

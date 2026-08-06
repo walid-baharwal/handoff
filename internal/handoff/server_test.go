@@ -3,6 +3,7 @@ package handoff
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -110,8 +111,15 @@ func TestServerUploadDownloadAndCleanup(t *testing.T) {
 	response.Body.Close()
 
 	packagePath := filepath.Join(dataDir, uploaded.ID+".handoff")
+	unmanagedPath := filepath.Join(dataDir, "important.handoff")
+	if err := os.WriteFile(unmanagedPath, []byte("unmanaged"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	old := time.Now().Add(-2 * time.Hour)
 	if err := os.Chtimes(packagePath, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(unmanagedPath, old, old); err != nil {
 		t.Fatal(err)
 	}
 	service.cleanupExpired()
@@ -120,6 +128,9 @@ func TestServerUploadDownloadAndCleanup(t *testing.T) {
 	}
 	if _, err := os.Stat(service.metadataPath(uploaded.ID)); !os.IsNotExist(err) {
 		t.Fatal("expired package metadata was not removed")
+	}
+	if _, err := os.Stat(unmanagedPath); err != nil {
+		t.Fatalf("cleanup removed an unmanaged file: %v", err)
 	}
 }
 
@@ -185,6 +196,144 @@ func TestServerRejectsInvalidPackage(t *testing.T) {
 	}
 }
 
+func TestServerEnforcesStorageAndUploadLimits(t *testing.T) {
+	token := strings.Repeat("q", 32)
+	packageSource := filepath.Join(t.TempDir(), "source.handoff")
+	writeTestPackage(t, packageSource, strings.Repeat("a", 32))
+	packageBytes, err := os.ReadFile(packageSource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := newService(serviceConfig{
+		Token:       token,
+		DataDir:     t.TempDir(),
+		DownloadDir: t.TempDir(),
+		MaxBytes:    defaultMaxBytes,
+		MaxStorage:  int64(len(packageBytes) - 1),
+		MaxUploads:  1,
+		Retention:   time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(service.routes())
+	defer server.Close()
+
+	response := request(t, http.MethodPost, server.URL+"/api/v1/handoffs", token, packageBytes)
+	if response.StatusCode != http.StatusInsufficientStorage {
+		t.Fatalf("quota status = %d: %s", response.StatusCode, readBody(response.Body))
+	}
+	response.Body.Close()
+
+	service.uploadSlots <- struct{}{}
+	response = request(t, http.MethodPost, server.URL+"/api/v1/handoffs", token, packageBytes)
+	<-service.uploadSlots
+	if response.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("concurrent upload status = %d, want %d", response.StatusCode, http.StatusServiceUnavailable)
+	}
+	response.Body.Close()
+}
+
+func TestServerDownloadRequiresMetadata(t *testing.T) {
+	token := strings.Repeat("m", 32)
+	dataDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dataDir, testID+".handoff"), []byte("orphaned package"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service, err := newService(serviceConfig{
+		Token:       token,
+		DataDir:     dataDir,
+		DownloadDir: t.TempDir(),
+		MaxBytes:    defaultMaxBytes,
+		Retention:   time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/handoffs/"+testID, nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+	response := httptest.NewRecorder()
+	service.routes().ServeHTTP(response, request)
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("orphaned package status = %d, want %d", response.Code, http.StatusNotFound)
+	}
+}
+
+func TestServerRejectsOversizedMetadata(t *testing.T) {
+	dataDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dataDir, testID+".json"), make([]byte, maxServerMetadataBytes+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service, err := newService(serviceConfig{
+		DataDir:     dataDir,
+		DownloadDir: t.TempDir(),
+		MaxBytes:    defaultMaxBytes,
+		Retention:   time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.loadMetadata(testID); err == nil || !strings.Contains(err.Error(), "size limit") {
+		t.Fatalf("expected metadata size error, got %v", err)
+	}
+}
+
+func TestWriteJSONExclusiveDoesNotOverwrite(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "metadata.json")
+	if err := writeJSONExclusive(path, map[string]string{"value": "first"}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSONExclusive(path, map[string]string{"value": "second"}, 0o600); err == nil {
+		t.Fatal("exclusive metadata write overwrote an existing file")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "first") || strings.Contains(string(data), "second") {
+		t.Fatalf("existing metadata changed: %s", data)
+	}
+}
+
+func TestServerCleanupRemovesOnlyStaleOwnedArtifacts(t *testing.T) {
+	dataDir := t.TempDir()
+	oldUpload := filepath.Join(dataDir, ".upload-old")
+	recentUpload := filepath.Join(dataDir, ".upload-recent")
+	orphanPackage := filepath.Join(dataDir, testID+".handoff")
+	unmanaged := filepath.Join(dataDir, "notes.tmp")
+	for _, path := range []string{oldUpload, recentUpload, orphanPackage, unmanaged} {
+		if err := os.WriteFile(path, []byte("data"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := time.Now().Add(-time.Hour)
+	for _, path := range []string{oldUpload, orphanPackage, unmanaged} {
+		if err := os.Chtimes(path, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	service, err := newService(serviceConfig{
+		DataDir:     dataDir,
+		DownloadDir: t.TempDir(),
+		MaxBytes:    defaultMaxBytes,
+		Retention:   24 * time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = service
+	for _, path := range []string{oldUpload, orphanPackage} {
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("stale owned artifact remains at %s", path)
+		}
+	}
+	for _, path := range []string{recentUpload, unmanaged} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("cleanup removed %s: %v", path, err)
+		}
+	}
+}
+
 func TestServerHomePage(t *testing.T) {
 	service, err := newService(serviceConfig{
 		DataDir:     t.TempDir(),
@@ -247,6 +396,67 @@ func TestServerHomePageEscapesHost(t *testing.T) {
 	}
 	if !strings.Contains(body, "&lt;script&gt;") {
 		t.Fatal("home response does not contain the escaped request host")
+	}
+}
+
+func TestServerBinaryDownloadRejectsSymlinkEscape(t *testing.T) {
+	downloadDir := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "secret")
+	if err := os.WriteFile(outside, []byte("not a binary"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(downloadDir, "handoff-linux-amd64")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlinks are not available: %v", err)
+	}
+	service, err := newService(serviceConfig{
+		DataDir:     t.TempDir(),
+		DownloadDir: downloadDir,
+		MaxBytes:    defaultMaxBytes,
+		Retention:   time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/downloads/handoff-linux-amd64", nil)
+	response := httptest.NewRecorder()
+	service.routes().ServeHTTP(response, request)
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("symlink download status = %d, want %d", response.Code, http.StatusNotFound)
+	}
+	if strings.Contains(response.Body.String(), "not a binary") {
+		t.Fatal("download exposed a file outside HANDOFF_DOWNLOAD_DIR")
+	}
+}
+
+func TestServerHandoffDownloadRejectsSymlinkEscape(t *testing.T) {
+	dataDir := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "secret")
+	if err := os.WriteFile(outside, []byte("outside package"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dataDir, testID+".handoff")); err != nil {
+		t.Skipf("symlinks are not available: %v", err)
+	}
+	service, err := newService(serviceConfig{
+		Token:       strings.Repeat("t", 32),
+		DataDir:     dataDir,
+		DownloadDir: t.TempDir(),
+		MaxBytes:    defaultMaxBytes,
+		Retention:   time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/handoffs/"+testID, nil)
+	request.Header.Set("Authorization", "Bearer "+strings.Repeat("t", 32))
+	response := httptest.NewRecorder()
+	service.routes().ServeHTTP(response, request)
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("symlink handoff status = %d, want %d", response.Code, http.StatusNotFound)
+	}
+	if strings.Contains(response.Body.String(), "outside package") {
+		t.Fatal("download exposed a file outside HANDOFF_DATA_DIR")
 	}
 }
 
