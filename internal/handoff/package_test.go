@@ -35,6 +35,29 @@ func TestPackageRejectsChecksumWhenBundleComesFirst(t *testing.T) {
 	}
 }
 
+func TestPackageRejectsTrailingManifestData(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bad.handoff")
+	metadata := manifest{
+		Version:      packageVersion,
+		BaseCommit:   strings.Repeat("a", 40),
+		Commit:       strings.Repeat("b", 40),
+		Ref:          "refs/handoff/outgoing/abcd",
+		BundleSHA256: strings.Repeat("0", 64),
+	}
+	manifestBytes, err := json.Marshal(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifestBytes = append(manifestBytes, []byte(" trailing")...)
+	writeArchive(t, path, []archiveEntry{
+		{name: "manifest.json", data: manifestBytes},
+		{name: "changes.bundle", data: []byte("bundle")},
+	})
+	if _, _, err := extractPackage(path, t.TempDir(), 1024); err == nil || !strings.Contains(err.Error(), "invalid handoff manifest") {
+		t.Fatalf("expected invalid manifest error, got %v", err)
+	}
+}
+
 func TestManifestValidation(t *testing.T) {
 	valid := manifest{
 		Version:    packageVersion,
@@ -50,6 +73,7 @@ func TestManifestValidation(t *testing.T) {
 		{Version: 2, BaseCommit: valid.BaseCommit, Commit: valid.Commit, Ref: valid.Ref},
 		{Version: packageVersion, BaseCommit: "bad", Commit: valid.Commit, Ref: valid.Ref},
 		{Version: packageVersion, BaseCommit: valid.BaseCommit, Commit: valid.Commit, Ref: "refs/heads/main"},
+		{Version: packageVersion, BaseCommit: valid.BaseCommit, Commit: valid.Commit, Ref: valid.Ref, FileCount: maxIncomingPaths + 1},
 	}
 	for _, value := range cases {
 		if err := validateManifest(value); err == nil {

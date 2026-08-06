@@ -17,10 +17,13 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
 var idPattern = regexp.MustCompile(`^[0-9a-f]{12}$`)
+
+const maxServerMetadataBytes = 128 << 10
 
 var homeTemplate = template.Must(template.New("home").Parse(`<!doctype html>
 <html lang="en">
@@ -132,6 +135,8 @@ type serviceConfig struct {
 	DataDir     string
 	DownloadDir string
 	MaxBytes    int64
+	MaxStorage  int64
+	MaxUploads  int
 	Retention   time.Duration
 	Logger      io.Writer
 }
@@ -141,8 +146,11 @@ type service struct {
 	dataDir     string
 	downloadDir string
 	maxBytes    int64
+	maxStorage  int64
 	retention   time.Duration
 	logger      *log.Logger
+	uploadSlots chan struct{}
+	quotaMu     sync.Mutex
 }
 
 func newService(cfg serviceConfig) (*service, error) {
@@ -152,13 +160,21 @@ func newService(cfg serviceConfig) (*service, error) {
 	if cfg.Logger == nil {
 		cfg.Logger = io.Discard
 	}
+	if cfg.MaxStorage <= 0 {
+		cfg.MaxStorage = defaultMaxStorageBytes
+	}
+	if cfg.MaxUploads <= 0 {
+		cfg.MaxUploads = defaultMaxUploads
+	}
 	s := &service{
 		token:       cfg.Token,
 		dataDir:     cfg.DataDir,
 		downloadDir: cfg.DownloadDir,
 		maxBytes:    cfg.MaxBytes,
+		maxStorage:  cfg.MaxStorage,
 		retention:   cfg.Retention,
 		logger:      log.New(cfg.Logger, "handoff ", log.LstdFlags|log.LUTC),
+		uploadSlots: make(chan struct{}, cfg.MaxUploads),
 	}
 	s.cleanupExpired()
 	go s.cleanupLoop()
@@ -232,6 +248,13 @@ func forwardedScheme(r *http.Request) string {
 }
 
 func (s *service) handleUpload(w http.ResponseWriter, r *http.Request) {
+	select {
+	case s.uploadSlots <- struct{}{}:
+		defer func() { <-s.uploadSlots }()
+	default:
+		http.Error(w, "too many uploads in progress", http.StatusServiceUnavailable)
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, s.maxBytes)
 	tmp, err := os.CreateTemp(s.dataDir, ".upload-*")
 	if err != nil {
@@ -246,6 +269,7 @@ func (s *service) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	written, copyErr := io.Copy(tmp, r.Body)
+	syncErr := tmp.Sync()
 	closeErr := tmp.Close()
 	if copyErr != nil {
 		var maxErr *http.MaxBytesError
@@ -256,7 +280,11 @@ func (s *service) handleUpload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "cannot read upload", http.StatusBadRequest)
 		return
 	}
-	if closeErr != nil || written == 0 {
+	if syncErr != nil || closeErr != nil {
+		http.Error(w, "cannot persist upload", http.StatusInternalServerError)
+		return
+	}
+	if written == 0 {
 		http.Error(w, "empty or incomplete upload", http.StatusBadRequest)
 		return
 	}
@@ -272,56 +300,101 @@ func (s *service) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id, finalPath, reservationPath, err := s.reserveID()
+	s.quotaMu.Lock()
+	defer s.quotaMu.Unlock()
+	storedBytes, err := s.storedPackageBytes()
+	if err != nil {
+		http.Error(w, "cannot inspect storage usage", http.StatusInternalServerError)
+		return
+	}
+	if written > s.maxStorage-storedBytes {
+		http.Error(w, "handoff storage quota exceeded", http.StatusInsufficientStorage)
+		return
+	}
+	id, finalPath, final, err := s.reserveID()
 	if err != nil {
 		http.Error(w, "cannot allocate handoff ID", http.StatusInternalServerError)
 		return
 	}
-	defer os.Remove(reservationPath)
-	if err := os.Rename(tmpName, finalPath); err != nil {
+	completed := false
+	defer func() {
+		_ = final.Close()
+		if !completed {
+			_ = os.Remove(finalPath)
+			_ = syncDirectory(s.dataDir)
+		}
+	}()
+	source, err := os.Open(tmpName)
+	if err != nil {
+		http.Error(w, "cannot finalize upload", http.StatusInternalServerError)
+		return
+	}
+	copied, copyErr := io.Copy(final, source)
+	sourceErr := source.Close()
+	syncErr = final.Sync()
+	closeErr = final.Close()
+	if copyErr != nil || sourceErr != nil || syncErr != nil || closeErr != nil || copied != written {
 		http.Error(w, "cannot finalize upload", http.StatusInternalServerError)
 		return
 	}
 	storedAt := time.Now().UTC()
 	record := metadataFromManifest(id, packageManifest, storedAt, storedAt.Add(s.retention), written)
-	if err := writeJSONAtomic(s.metadataPath(id), record, 0o600); err != nil {
-		_ = os.Remove(finalPath)
+	if err := writeJSONExclusive(s.metadataPath(id), record, 0o600); err != nil {
 		http.Error(w, "cannot index upload", http.StatusInternalServerError)
 		return
 	}
+	completed = true
 	s.logger.Printf("uploaded id=%s bytes=%d", id, written)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	_ = json.NewEncoder(w).Encode(record)
 }
 
-func (s *service) reserveID() (string, string, string, error) {
+func (s *service) storedPackageBytes() (int64, error) {
+	entries, err := os.ReadDir(s.dataDir)
+	if err != nil {
+		return 0, err
+	}
+	var total int64
+	for _, entry := range entries {
+		id := strings.TrimSuffix(entry.Name(), ".handoff")
+		if !idPattern.MatchString(id) || entry.Name() != id+".handoff" || entry.Type()&os.ModeSymlink != 0 {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return 0, err
+		}
+		if info.Mode().IsRegular() {
+			total += info.Size()
+		}
+	}
+	return total, nil
+}
+
+func (s *service) reserveID() (string, string, *os.File, error) {
 	for range 20 {
 		data := make([]byte, 6)
 		if _, err := rand.Read(data); err != nil {
-			return "", "", "", err
+			return "", "", nil, err
 		}
 		id := hex.EncodeToString(data)
 		finalPath := filepath.Join(s.dataDir, id+".handoff")
-		reservationPath := filepath.Join(s.dataDir, "."+id+".reserve")
-		reservation, err := os.OpenFile(reservationPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		if _, err := os.Lstat(s.metadataPath(id)); err == nil {
+			continue
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return "", "", nil, err
+		}
+		file, err := os.OpenFile(finalPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 		if errors.Is(err, os.ErrExist) {
 			continue
 		}
 		if err != nil {
-			return "", "", "", err
+			return "", "", nil, err
 		}
-		if closeErr := reservation.Close(); closeErr != nil {
-			_ = os.Remove(reservationPath)
-			return "", "", "", closeErr
-		}
-		if _, err := os.Stat(finalPath); err == nil || !errors.Is(err, os.ErrNotExist) {
-			_ = os.Remove(reservationPath)
-			continue
-		}
-		return id, finalPath, reservationPath, nil
+		return id, finalPath, file, nil
 	}
-	return "", "", "", errors.New("ID collision limit reached")
+	return "", "", nil, errors.New("ID collision limit reached")
 }
 
 func (s *service) metadataPath(id string) string {
@@ -363,7 +436,7 @@ func (s *service) handleList(w http.ResponseWriter, r *http.Request) {
 		if err != nil || (!record.ExpiresAt.IsZero() && !record.ExpiresAt.After(now)) {
 			continue
 		}
-		if _, err := os.Stat(filepath.Join(s.dataDir, id+".handoff")); err != nil {
+		if !s.regularDataFileExists(id + ".handoff") {
 			continue
 		}
 		if repositoryID != "" && record.RepositoryID != repositoryID {
@@ -400,7 +473,7 @@ func (s *service) handleMetadata(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "cannot read handoff metadata", http.StatusInternalServerError)
 		return
 	}
-	if (!record.ExpiresAt.IsZero() && !record.ExpiresAt.After(time.Now())) || !regularFileExists(filepath.Join(s.dataDir, id+".handoff")) {
+	if (!record.ExpiresAt.IsZero() && !record.ExpiresAt.After(time.Now())) || !s.regularDataFileExists(id+".handoff") {
 		http.NotFound(w, r)
 		return
 	}
@@ -409,15 +482,28 @@ func (s *service) handleMetadata(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(record)
 }
 
-func regularFileExists(path string) bool {
-	info, err := os.Stat(path)
+func (s *service) regularDataFileExists(name string) bool {
+	file, err := s.openDataFile(name)
+	if err != nil {
+		return false
+	}
+	defer file.Close()
+	info, err := file.Stat()
 	return err == nil && info.Mode().IsRegular()
 }
 
 func (s *service) loadMetadata(id string) (handoffMetadata, error) {
-	data, err := os.ReadFile(s.metadataPath(id))
+	file, err := s.openDataFile(id + ".json")
 	if err != nil {
 		return handoffMetadata{}, err
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, maxServerMetadataBytes+1))
+	if err != nil {
+		return handoffMetadata{}, err
+	}
+	if len(data) > maxServerMetadataBytes {
+		return handoffMetadata{}, errors.New("handoff metadata exceeds size limit")
 	}
 	var record handoffMetadata
 	if err := json.Unmarshal(data, &record); err != nil {
@@ -435,6 +521,8 @@ func (s *service) handleDelete(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	s.quotaMu.Lock()
+	defer s.quotaMu.Unlock()
 	packagePath := filepath.Join(s.dataDir, id+".handoff")
 	if err := os.Remove(packagePath); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -455,23 +543,19 @@ func (s *service) handleDownload(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	if record, err := s.loadMetadata(id); err == nil && !record.ExpiresAt.IsZero() && !record.ExpiresAt.After(time.Now()) {
+	record, err := s.loadMetadata(id)
+	if err != nil || (!record.ExpiresAt.IsZero() && !record.ExpiresAt.After(time.Now())) {
 		http.NotFound(w, r)
 		return
 	}
-	path := filepath.Join(s.dataDir, id+".handoff")
-	file, err := os.Open(path)
+	file, err := s.openDataFile(id + ".handoff")
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			http.NotFound(w, r)
-			return
-		}
-		http.Error(w, "cannot read handoff", http.StatusInternalServerError)
+		http.NotFound(w, r)
 		return
 	}
 	defer file.Close()
 	info, err := file.Stat()
-	if err != nil {
+	if err != nil || !info.Mode().IsRegular() {
 		http.Error(w, "cannot inspect handoff", http.StatusInternalServerError)
 		return
 	}
@@ -481,6 +565,15 @@ func (s *service) handleDownload(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "private, no-store")
 	_, _ = io.Copy(w, file)
 	s.logger.Printf("downloaded id=%s bytes=%d", id, info.Size())
+}
+
+func (s *service) openDataFile(name string) (*os.File, error) {
+	root, err := os.OpenRoot(s.dataDir)
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	return root.Open(name)
 }
 
 func (s *service) handleDownloadBinary(w http.ResponseWriter, r *http.Request) {
@@ -494,13 +587,24 @@ func (s *service) handleDownloadBinary(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	path := filepath.Join(s.downloadDir, name)
-	info, err := os.Stat(path)
+	root, err := os.OpenRoot(s.downloadDir)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	defer root.Close()
+	file, err := root.Open(name)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	defer file.Close()
+	info, err := file.Stat()
 	if err != nil || !info.Mode().IsRegular() {
 		http.NotFound(w, r)
 		return
 	}
-	http.ServeFile(w, r, path)
+	http.ServeContent(w, r, name, info.ModTime(), file)
 }
 
 func (s *service) cleanupLoop() {
@@ -512,23 +616,51 @@ func (s *service) cleanupLoop() {
 }
 
 func (s *service) cleanupExpired() {
+	s.quotaMu.Lock()
+	defer s.quotaMu.Unlock()
 	entries, err := os.ReadDir(s.dataDir)
 	if err != nil {
 		s.logger.Printf("cleanup error=%q", err)
 		return
 	}
 	cutoff := time.Now().Add(-s.retention)
+	temporaryCutoff := time.Now().Add(-10 * time.Minute)
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".handoff") {
+		if isServiceTemporary(entry.Name()) && !entry.IsDir() && entry.Type()&os.ModeSymlink == 0 {
+			if info, err := entry.Info(); err == nil && info.ModTime().Before(temporaryCutoff) {
+				_ = os.Remove(filepath.Join(s.dataDir, entry.Name()))
+			}
+			continue
+		}
+		id := strings.TrimSuffix(entry.Name(), ".handoff")
+		if entry.IsDir() || !idPattern.MatchString(id) || entry.Name() != id+".handoff" {
 			continue
 		}
 		info, err := entry.Info()
-		if err != nil || !info.ModTime().Before(cutoff) {
+		if err != nil {
+			continue
+		}
+		if info.ModTime().Before(temporaryCutoff) {
+			if _, err := s.loadMetadata(id); err != nil {
+				_ = os.Remove(filepath.Join(s.dataDir, entry.Name()))
+				_ = os.Remove(s.metadataPath(id))
+				continue
+			}
+		}
+		if !info.ModTime().Before(cutoff) {
 			continue
 		}
 		if err := os.Remove(filepath.Join(s.dataDir, entry.Name())); err == nil {
-			_ = os.Remove(s.metadataPath(strings.TrimSuffix(entry.Name(), ".handoff")))
-			s.logger.Printf("expired id=%s", strings.TrimSuffix(entry.Name(), ".handoff"))
+			_ = os.Remove(s.metadataPath(id))
+			s.logger.Printf("expired id=%s", id)
 		}
 	}
+}
+
+func isServiceTemporary(name string) bool {
+	if strings.HasPrefix(name, ".upload-") || strings.HasPrefix(name, ".tmp-") {
+		return true
+	}
+	id := strings.TrimSuffix(strings.TrimPrefix(name, "."), ".reserve")
+	return name == "."+id+".reserve" && idPattern.MatchString(id)
 }

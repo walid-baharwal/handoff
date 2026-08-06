@@ -184,7 +184,7 @@ func TestInboxInspectAndPullJSONWorkflow(t *testing.T) {
 			t.Fatalf("unexpected pull preview: %#v", preview)
 		}
 
-		pullData := runJSONCommand(t, []string{"pull", "--json", id}, "pull")
+		pullData := runJSONCommand(t, []string{"pull", "--yes", "--json", id}, "pull")
 		var pull struct {
 			Status   string         `json:"status"`
 			Applied  bool           `json:"applied"`

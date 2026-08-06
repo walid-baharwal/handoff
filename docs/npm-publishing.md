@@ -44,7 +44,7 @@ repository publishes npm packages. Existing global installations do not
 self-update; users update with:
 
 ```bash
-npm install --global @walid-baharwal/handoff@latest
+npm install -g @walid-baharwal/handoff@latest
 ```
 
 ## One-time owner setup
@@ -121,7 +121,7 @@ Future version tags now publish without a stored npm credential.
 6. Test a clean installation:
 
    ```bash
-   npm install --global @walid-baharwal/handoff@latest
+   npm install -g @walid-baharwal/handoff@latest
    handoff version
    ```
 

@@ -32,6 +32,14 @@ func runServe(args []string, stdout, stderr io.Writer) error {
 	if err != nil || maxBytes < 1 {
 		return errors.New("HANDOFF_MAX_BYTES must be a positive integer")
 	}
+	maxStorageBytes, err := envInt64("HANDOFF_MAX_STORAGE_BYTES", defaultMaxStorageBytes)
+	if err != nil || maxStorageBytes < 1 {
+		return errors.New("HANDOFF_MAX_STORAGE_BYTES must be a positive integer")
+	}
+	maxUploads, err := envInt64("HANDOFF_MAX_UPLOADS", defaultMaxUploads)
+	if err != nil || maxUploads < 1 || maxUploads > 100 {
+		return errors.New("HANDOFF_MAX_UPLOADS must be between 1 and 100")
+	}
 	retention, err := time.ParseDuration(envOr("HANDOFF_RETENTION", "720h"))
 	if err != nil || retention <= 0 {
 		return errors.New("HANDOFF_RETENTION must be a positive duration")
@@ -42,6 +50,8 @@ func runServe(args []string, stdout, stderr io.Writer) error {
 		DataDir:     envOr("HANDOFF_DATA_DIR", "/data"),
 		DownloadDir: envOr("HANDOFF_DOWNLOAD_DIR", "/downloads"),
 		MaxBytes:    maxBytes,
+		MaxStorage:  maxStorageBytes,
+		MaxUploads:  int(maxUploads),
 		Retention:   retention,
 		Logger:      stderr,
 	})

@@ -47,6 +47,18 @@ func TestInteractiveInboxPullEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	var cancelled bytes.Buffer
+	inDirectory(t, receiver, func() {
+		err = runPull([]string{id}, strings.NewReader("no\n"), &cancelled)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertFile(t, filepath.Join(receiver, "app.txt"), "base\n")
+	if !strings.Contains(cancelled.String(), "Pull cancelled.") {
+		t.Fatalf("direct pull did not request confirmation:\n%s", cancelled.String())
+	}
+
 	var output bytes.Buffer
 	inDirectory(t, receiver, func() {
 		err = runPull(nil, strings.NewReader("1\nyes\n"), &output)
@@ -59,6 +71,17 @@ func TestInteractiveInboxPullEndToEnd(t *testing.T) {
 		!strings.Contains(output.String(), "From: Handoff Test (self-reported)") ||
 		!strings.Contains(output.String(), "Handoff "+id+" applied successfully") {
 		t.Fatalf("unexpected interactive output:\n%s", output.String())
+	}
+}
+
+func TestJSONPullRequiresExplicitYesWithoutPrompting(t *testing.T) {
+	var output bytes.Buffer
+	err := runPull([]string{"--json", testID}, strings.NewReader(""), &output)
+	if err == nil || !strings.Contains(err.Error(), "--yes is required") {
+		t.Fatalf("expected explicit --yes error, got %v", err)
+	}
+	if output.Len() != 0 {
+		t.Fatalf("JSON pull wrote an interactive prompt: %q", output.String())
 	}
 }
 

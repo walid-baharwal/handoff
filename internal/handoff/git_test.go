@@ -1,6 +1,7 @@
 package handoff
 
 import (
+	"bufio"
 	"bytes"
 	"io"
 	"os"
@@ -8,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 const testID = "abcdef123456"
@@ -18,10 +20,11 @@ func TestGitHandoffRegression(t *testing.T) {
 		writeFile(t, filepath.Join(receiver, "app.txt"), "local before backup\n")
 		originalHead := git(t, receiver, "rev-parse", "HEAD")
 		state := handoffState{
-			ID:           testID,
-			OriginalHead: originalHead,
-			IncomingRef:  "refs/handoff/incoming/" + testID,
-			Phase:        phasePrepare,
+			ID:             testID,
+			OriginalHead:   originalHead,
+			IncomingRef:    "refs/handoff/incoming/" + testID,
+			IncomingCommit: originalHead,
+			Phase:          phasePrepare,
 		}
 		if err := saveState(statePath(receiver), state); err != nil {
 			t.Fatal(err)
@@ -35,18 +38,42 @@ func TestGitHandoffRegression(t *testing.T) {
 		assertNoState(t, receiver)
 	})
 
+	t.Run("abort rejects an unsafe restore state before changing files", func(t *testing.T) {
+		_, receiver := clonePair(t)
+		writeFile(t, filepath.Join(receiver, "app.txt"), "local work\n")
+		head := git(t, receiver, "rev-parse", "HEAD")
+		state := handoffState{
+			ID:             testID,
+			OriginalHead:   head,
+			IncomingRef:    "refs/handoff/incoming/" + testID,
+			IncomingCommit: head,
+			Phase:          phaseRestore,
+		}
+		if err := saveState(statePath(receiver), state); err != nil {
+			t.Fatal(err)
+		}
+		inDirectory(t, receiver, func() {
+			err := abortHandoff(testID, io.Discard)
+			if err == nil || !strings.Contains(err.Error(), "missing its local backup") {
+				t.Fatalf("expected missing backup error, got %v", err)
+			}
+		})
+		assertFile(t, filepath.Join(receiver, "app.txt"), "local work\n")
+	})
+
 	t.Run("continue cannot discard an incomplete local restore", func(t *testing.T) {
 		_, receiver := clonePair(t)
 		writeFile(t, filepath.Join(receiver, "app.txt"), "protected local work\n")
 		backupHash := git(t, receiver, "stash", "create", "handoff backup "+testID)
 		git(t, receiver, "update-ref", backupRef(testID), backupHash)
 		state := handoffState{
-			ID:            testID,
-			OriginalHead:  git(t, receiver, "rev-parse", "HEAD"),
-			IncomingRef:   "refs/handoff/incoming/" + testID,
-			StashHash:     backupHash,
-			PrivateBackup: true,
-			Phase:         phaseRestore,
+			ID:             testID,
+			OriginalHead:   git(t, receiver, "rev-parse", "HEAD"),
+			IncomingRef:    "refs/handoff/incoming/" + testID,
+			IncomingCommit: git(t, receiver, "rev-parse", "HEAD"),
+			StashHash:      backupHash,
+			PrivateBackup:  true,
+			Phase:          phaseRestore,
 		}
 		if err := saveState(statePath(receiver), state); err != nil {
 			t.Fatal(err)
@@ -60,6 +87,7 @@ func TestGitHandoffRegression(t *testing.T) {
 		if got := git(t, receiver, "rev-parse", backupRef(testID)); got != backupHash {
 			t.Fatal("continue discarded the local backup")
 		}
+		git(t, receiver, "update-ref", "-d", backupRef(testID))
 		inDirectory(t, receiver, func() {
 			if err := abortHandoff(testID, io.Discard); err != nil {
 				t.Fatal(err)
@@ -67,6 +95,71 @@ func TestGitHandoffRegression(t *testing.T) {
 		})
 		assertFile(t, filepath.Join(receiver, "app.txt"), "protected local work\n")
 		assertNoState(t, receiver)
+	})
+
+	t.Run("repository operation lock rejects overlapping commands", func(t *testing.T) {
+		_, receiver := clonePair(t)
+		release, err := acquireOperationLock(receiver)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := acquireOperationLock(receiver); err == nil || !strings.Contains(err.Error(), "already changing") {
+			release()
+			t.Fatalf("expected overlapping operation rejection, got %v", err)
+		}
+		release()
+		release, err = acquireOperationLock(receiver)
+		if err != nil {
+			t.Fatalf("lock was not released: %v", err)
+		}
+		release()
+	})
+
+	t.Run("temporary HEAD activation is idempotent after interruption", func(t *testing.T) {
+		_, receiver := clonePair(t)
+		writeFile(t, filepath.Join(receiver, "app.txt"), "incoming resolution\n")
+		git(t, receiver, "add", "app.txt")
+		head := git(t, receiver, "rev-parse", "HEAD")
+		state := handoffState{
+			ID:             testID,
+			OriginalHead:   head,
+			IncomingRef:    "refs/handoff/incoming/" + testID,
+			IncomingCommit: head,
+			Phase:          phaseIncoming,
+		}
+		stateFile := statePath(receiver)
+		if err := saveState(stateFile, state); err != nil {
+			t.Fatal(err)
+		}
+		if err := makeTemporaryHead(receiver, &state, stateFile); err != nil {
+			t.Fatal(err)
+		}
+		git(t, receiver, "update-ref", "-d", temporaryRef(testID))
+		if err := validateStateObjects(receiver, state, true); err != nil {
+			t.Fatalf("persisted temporary HEAD is not recoverable: %v", err)
+		}
+		if err := makeTemporaryHead(receiver, &state, stateFile); err != nil {
+			t.Fatalf("retry failed: %v", err)
+		}
+		if got := git(t, receiver, "rev-parse", "HEAD"); got != state.TemporaryHead {
+			t.Fatalf("HEAD = %s, want temporary commit %s", got, state.TemporaryHead)
+		}
+	})
+
+	t.Run("recovery rejects a backup from another HEAD", func(t *testing.T) {
+		_, receiver := clonePair(t)
+		head := git(t, receiver, "rev-parse", "HEAD")
+		state := handoffState{
+			ID:             testID,
+			OriginalHead:   head,
+			IncomingRef:    "refs/handoff/incoming/" + testID,
+			IncomingCommit: head,
+			StashHash:      head,
+			Phase:          phaseRestore,
+		}
+		if err := validateStateObjects(receiver, state, false); err == nil || !strings.Contains(err.Error(), "not based on") {
+			t.Fatalf("expected invalid backup rejection, got %v", err)
+		}
 	})
 
 	t.Run("clean apply keeps receiver HEAD and sender index unchanged", func(t *testing.T) {
@@ -230,6 +323,129 @@ func TestGitHandoffRegression(t *testing.T) {
 		assertNoState(t, receiver)
 		if stash := git(t, receiver, "stash", "list"); stash != "" {
 			t.Fatalf("failed pull left a stash: %s", stash)
+		}
+	})
+
+	t.Run("ignored collision is rejected without changing local data", func(t *testing.T) {
+		sender, receiver := clonePair(t)
+		writeFile(t, filepath.Join(sender, "secret.env"), "incoming\n")
+		packagePath := buildFrom(t, sender, nil)
+
+		writeFile(t, filepath.Join(receiver, ".git", "info", "exclude"), "secret.env\n")
+		writeFile(t, filepath.Join(receiver, "secret.env"), "local secret\n")
+		err := applyFrom(t, receiver, packagePath, true)
+		if err == nil || !strings.Contains(err.Error(), "would be overwritten") {
+			t.Fatalf("expected ignored collision rejection, got %v", err)
+		}
+		assertFile(t, filepath.Join(receiver, "secret.env"), "local secret\n")
+		assertNoState(t, receiver)
+	})
+
+	t.Run("ignored replacement for a tracked deletion survives preparation", func(t *testing.T) {
+		sender, receiver := clonePair(t)
+		writeFile(t, filepath.Join(sender, "app.txt"), "incoming\n")
+		packagePath := buildFrom(t, sender, nil)
+
+		if err := os.Remove(filepath.Join(receiver, "delete.txt")); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(filepath.Join(receiver, "delete.txt"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		writeFile(t, filepath.Join(receiver, "delete.txt", "secret"), "local secret\n")
+		writeFile(t, filepath.Join(receiver, ".git", "info", "exclude"), "delete.txt/\n")
+		err := applyFrom(t, receiver, packagePath, true)
+		if err == nil || !strings.Contains(err.Error(), "would be overwritten") {
+			t.Fatalf("expected reset collision rejection, got %v", err)
+		}
+		assertFile(t, filepath.Join(receiver, "delete.txt", "secret"), "local secret\n")
+		assertNoState(t, receiver)
+	})
+
+	t.Run("expanded incoming files are size limited", func(t *testing.T) {
+		sender, _ := clonePair(t)
+		base := git(t, sender, "rev-parse", "HEAD")
+		writeFile(t, filepath.Join(sender, "large.txt"), strings.Repeat("x", 32))
+		git(t, sender, "add", "large.txt")
+		git(t, sender, "commit", "-m", "large")
+		commit := git(t, sender, "rev-parse", "HEAD")
+		_, objects, err := inspectIncomingChanges(sender, nil, base, commit)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := enforceExpandedSize(sender, nil, objects, 16); err == nil || !strings.Contains(err.Error(), "expanded-size limit") {
+			t.Fatalf("expected expanded-size rejection, got %v", err)
+		}
+	})
+
+	t.Run("manifest file summary must match incoming paths", func(t *testing.T) {
+		metadata := manifest{FileCount: 1, Files: []string{"claimed.txt"}}
+		if err := validateFileSummary(metadata, []string{"actual.txt"}); err == nil {
+			t.Fatal("mismatched file summary was accepted")
+		}
+		metadata.Files[0] = "actual.txt"
+		if err := validateFileSummary(metadata, []string{"actual.txt"}); err != nil {
+			t.Fatalf("matching file summary was rejected: %v", err)
+		}
+	})
+
+	t.Run("incoming commit must have the declared base as its only parent", func(t *testing.T) {
+		sender, _ := clonePair(t)
+		base := git(t, sender, "rev-parse", "HEAD")
+		tree := git(t, sender, "rev-parse", "HEAD^{tree}")
+		unrelated := git(t, sender, "commit-tree", tree)
+		commit := git(t, sender, "commit-tree", tree, "-p", unrelated)
+		if err := validateCommitParent(sender, nil, commit, base); err == nil || !strings.Contains(err.Error(), "only parent") {
+			t.Fatalf("expected parent validation error, got %v", err)
+		}
+	})
+
+	t.Run("rejected bundle objects stay out of the receiver repository", func(t *testing.T) {
+		sender, receiver := clonePair(t)
+		base := git(t, sender, "rev-parse", "HEAD")
+		tree := git(t, sender, "rev-parse", "HEAD^{tree}")
+		unrelated := git(t, sender, "commit-tree", tree)
+		commit := git(t, sender, "commit-tree", tree, "-p", unrelated)
+		ref := "refs/handoff/outgoing/deadbeef"
+		git(t, sender, "update-ref", ref, commit)
+		bundlePath := filepath.Join(t.TempDir(), "changes.bundle")
+		git(t, sender, "bundle", "create", bundlePath, ref, "^"+base)
+		packagePath := filepath.Join(t.TempDir(), "changes.handoff")
+		if err := createPackage(packagePath, bundlePath, manifest{
+			BaseCommit: base,
+			Commit:     commit,
+			Ref:        ref,
+			CreatedAt:  time.Now().UTC(),
+			FileCount:  0,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := gitOutput(receiver, nil, "cat-file", "-e", commit+"^{commit}"); err == nil {
+			t.Fatal("receiver unexpectedly had the rejected commit before apply")
+		}
+		err := applyFrom(t, receiver, packagePath, true)
+		if err == nil || !strings.Contains(err.Error(), "only parent") {
+			t.Fatalf("expected parent validation error, got %v", err)
+		}
+		if _, err := gitOutput(receiver, nil, "cat-file", "-e", commit+"^{commit}"); err == nil {
+			t.Fatal("rejected bundle object leaked into the receiver repository")
+		}
+	})
+
+	t.Run("raw diff fields are bounded while streaming", func(t *testing.T) {
+		reader := bufio.NewReader(strings.NewReader("oversized\x00"))
+		remaining := int64(64)
+		if _, err := readNULField(reader, &remaining, 4); err == nil {
+			t.Fatal("oversized raw diff field was accepted")
+		}
+	})
+
+	t.Run("path collision comparison honors case-insensitive repositories", func(t *testing.T) {
+		if _, _, collided := findPathCollision([]string{"secret.env"}, []string{"Secret.env"}, true); !collided {
+			t.Fatal("case-insensitive collision was missed")
+		}
+		if _, _, collided := findPathCollision([]string{"a"}, []string{"a-", "a/file"}, false); !collided {
+			t.Fatal("prefix collision separated by a neighboring path was missed")
 		}
 	})
 
@@ -414,5 +630,21 @@ func assertNoState(t *testing.T, repo string) {
 	t.Helper()
 	if _, err := os.Stat(statePath(repo)); !os.IsNotExist(err) {
 		t.Fatalf("handoff state remains: %v", err)
+	}
+}
+
+func TestGitEnvironmentRemovesInheritedGitVariables(t *testing.T) {
+	t.Setenv("GIT_DIR", "/tmp/untrusted-repository")
+	t.Setenv("GIT_WORK_TREE", "/tmp/untrusted-worktree")
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "core.hooksPath")
+	t.Setenv("GIT_CONFIG_VALUE_0", "/tmp/untrusted-hooks")
+
+	env := gitEnvironment("GIT_LITERAL_PATHSPECS=1")
+	for _, entry := range env {
+		name, _, _ := strings.Cut(entry, "=")
+		if strings.HasPrefix(strings.ToUpper(name), "GIT_") && name != "GIT_LITERAL_PATHSPECS" {
+			t.Fatalf("inherited Git variable remains in environment: %s", name)
+		}
 	}
 }
