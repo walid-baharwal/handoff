@@ -54,13 +54,16 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           npm ci --prefix vscode
           node vscode/scripts/package-vsix.mjs --version "$VERSION" --binaries dist --output vscode/dist
-      - name: Verify VS Code publishing configuration
+      - name: Check VS Code publishing configuration
+        id: vscode-publishing
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
         run: |
-          if [[ -z "$VSCE_PAT" ]]; then
-            echo "VSCE_PAT is required to publish the VS Code extension. See docs/vscode-publishing.md."
-            exit 1
+          if [[ -n "$VSCE_PAT" ]]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::VSCE_PAT is not configured; skipping Visual Studio Marketplace publishing."
           fi
       - name: Publish npm packages
         env:
@@ -74,6 +77,7 @@ jobs:
           fi
           node npm/scripts/publish-packages.mjs npm/dist
       - name: Publish VS Code extension
+        if: steps.vscode-publishing.outputs.enabled == 'true'
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
         run: |

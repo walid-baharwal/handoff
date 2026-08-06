@@ -28,9 +28,9 @@ for GitHub Releases and npm packages:
 5. Review the publisher profile and extension listing details before tagging a
    production release.
 
-The workflow deliberately fails if `VSCE_PAT` is absent. This prevents a
-version tag from publishing the GitHub and npm releases while silently skipping
-the Marketplace package.
+If `VSCE_PAT` is absent, the workflow skips Marketplace publishing and continues
+with npm and the GitHub Release. The built VSIX files are still attached to the
+GitHub Release for manual installation.
 
 ## How releases update VS Code
 
@@ -64,7 +64,9 @@ test before the first Marketplace release.
 1. Merge the VS Code extension change into `sandbox`, then promote `sandbox`
    to `main` with a merge commit.
 2. Confirm CI is green on `main`.
-3. Confirm `VSCE_PAT` exists and the publisher name remains correct.
+3. To publish to the Marketplace, confirm `VSCE_PAT` exists and the publisher
+   name remains correct. Otherwise, Marketplace publishing is skipped.
 4. Tag a new version on `main` and push the tag.
 5. Verify the GitHub Release includes all five `.vsix` files.
-6. Verify the Marketplace listing offers the same version for each platform.
+6. If Marketplace publishing was enabled, verify the listing offers the same
+   version for each platform.
