@@ -2,6 +2,7 @@ package handoff
 
 import (
 	"bytes"
+	"io"
 	"strings"
 	"testing"
 )
@@ -60,5 +61,12 @@ func TestSecureTokenEqual(t *testing.T) {
 		if secureTokenEqual(token, authorization) {
 			t.Fatalf("accepted invalid authorization %q", authorization)
 		}
+	}
+}
+
+func TestServeRejectsPositionalArguments(t *testing.T) {
+	err := runServe([]string{"unexpected"}, io.Discard, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "usage: handoff serve") {
+		t.Fatalf("expected serve usage error, got %v", err)
 	}
 }

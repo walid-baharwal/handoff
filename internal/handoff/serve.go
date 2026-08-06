@@ -22,7 +22,10 @@ func runServe(args []string, stdout, stderr io.Writer) error {
 	fs.SetOutput(io.Discard)
 	address := fs.String("address", envOr("HANDOFF_ADDRESS", ":8080"), "listen address")
 	if err := fs.Parse(args); err != nil {
-		return err
+		return invalidArguments(err.Error())
+	}
+	if len(fs.Args()) != 0 {
+		return invalidArguments("usage: handoff serve [--address ADDRESS]")
 	}
 	tokenValue := strings.TrimSpace(os.Getenv("HANDOFF_TOKEN"))
 	if len(tokenValue) < 32 {
