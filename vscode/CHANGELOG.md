@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Added a native Activity Bar inbox with refresh, inspect, and pull actions.
+
 ## 0.2.2 - 2026-08-06
 
 - Hardened package validation, repository recovery, and server storage safety.

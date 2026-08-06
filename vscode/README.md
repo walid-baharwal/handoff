@@ -11,6 +11,8 @@ does not require a global npm installation.
 - **Handoff: Configure Server** saves a Handoff server URL and team token.
 - **Handoff: Open Inbox** lists handoffs for the open repository and lets you
   inspect or pull one.
+- The **Handoff** Activity Bar view keeps the repository inbox one click away;
+  use its refresh button to load the latest handoffs, then inspect or pull one.
 - **Handoff: Push Changes** previews the current repository changes and uploads
   them after confirmation.
 - **Handoff: Pull Handoff** lets you enter a handoff ID directly.

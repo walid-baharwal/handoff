@@ -26,6 +26,7 @@
     "extension.js",
     "lib/**",
     "bin/**",
+    "resources/**",
     "README.md",
     "LICENSE",
     "CHANGELOG.md"
@@ -39,7 +40,9 @@
       "description": "Handoff runs Git commands and changes files in the current repository."
     }
   },
-  "activationEvents": [],
+  "activationEvents": [
+    "onView:handoff.inbox"
+  ],
   "contributes": {
     "commands": [
       {
@@ -49,6 +52,20 @@
       {
         "command": "handoff.openInbox",
         "title": "Handoff: Open Inbox"
+      },
+      {
+        "command": "handoff.refreshInbox",
+        "title": "Handoff: Refresh Inbox",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "handoff.inspectInboxItem",
+        "title": "Handoff: Inspect Handoff"
+      },
+      {
+        "command": "handoff.pullInboxItem",
+        "title": "Handoff: Pull Handoff",
+        "icon": "$(cloud-download)"
       },
       {
         "command": "handoff.pushChanges",
@@ -81,6 +98,44 @@
           "markdownDescription": "Optional path to a Handoff binary. Leave empty to use the binary bundled with this extension."
         }
       }
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "handoff",
+          "title": "Handoff",
+          "icon": "resources/handoff.svg"
+        }
+      ]
+    },
+    "views": {
+      "handoff": [
+        {
+          "id": "handoff.inbox",
+          "name": "Inbox"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "handoff.refreshInbox",
+          "when": "view == handoff.inbox",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "handoff.pullInboxItem",
+          "when": "view == handoff.inbox && viewItem == handoff.inboxItem",
+          "group": "inline"
+        },
+        {
+          "command": "handoff.inspectInboxItem",
+          "when": "view == handoff.inbox && viewItem == handoff.inboxItem",
+          "group": "navigation"
+        }
+      ]
     }
   },
   "scripts": {

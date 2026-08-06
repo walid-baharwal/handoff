@@ -6,6 +6,11 @@ const {
   resolveBinary,
   runHandoff
 } = require("./lib/cli");
+const {
+  handoffDescription,
+  handoffLabel,
+  handoffTooltip
+} = require("./lib/inbox");
 
 const tokenSecretKey = "handoff.teamToken";
 
@@ -39,6 +44,62 @@ function handoffDetail(handoff) {
   const author = handoff.author || "unknown sender";
   const branch = handoff.branch || "unknown branch";
   return `${author} · ${branch} · ${handoff.file_count} file${handoff.file_count === 1 ? "" : "s"}`;
+}
+
+class InboxProvider {
+  constructor() {
+    this.handoffs = undefined;
+    this.cwd = undefined;
+    this.changeEmitter = new vscode.EventEmitter();
+    this.onDidChangeTreeData = this.changeEmitter.event;
+  }
+
+  dispose() {
+    this.changeEmitter.dispose();
+  }
+
+  getTreeItem(item) {
+    return item;
+  }
+
+  getChildren() {
+    if (this.handoffs === undefined) return [this.emptyItem("Refresh to load Handoffs for this repository.")];
+    if (this.handoffs.length === 0) return [this.emptyItem("No Handoffs are available for this repository.")];
+    return this.handoffs.map((handoff) => this.handoffItem(handoff));
+  }
+
+  emptyItem(description) {
+    const item = new vscode.TreeItem("Handoff inbox");
+    item.description = description;
+    item.iconPath = new vscode.ThemeIcon("inbox");
+    item.contextValue = "handoff.inboxEmpty";
+    return item;
+  }
+
+  handoffItem(handoff) {
+    const item = new vscode.TreeItem(handoffLabel(handoff));
+    item.id = `handoff:${handoff.id}`;
+    item.description = handoffDescription(handoff);
+    item.tooltip = handoffTooltip(handoff);
+    item.iconPath = new vscode.ThemeIcon("git-pull-request");
+    item.contextValue = "handoff.inboxItem";
+    item.command = {
+      command: "handoff.inspectInboxItem",
+      title: "Inspect Handoff",
+      arguments: [handoff, this.cwd]
+    };
+    return item;
+  }
+
+  async refresh(context, cwd) {
+    const root = cwd || await workspaceRoot();
+    if (!root) return undefined;
+    const result = await execute(context, ["list"], { cwd: root });
+    this.cwd = root;
+    this.handoffs = result.data.handoffs;
+    this.changeEmitter.fire(undefined);
+    return this.handoffs.length;
+  }
 }
 
 async function configure(context) {
@@ -95,6 +156,29 @@ async function openInbox(context) {
     "Pull"
   );
   if (action === "Pull") await pull(context, handoff.id, cwd);
+}
+
+async function inspectInboxItem(context, handoff, cwd) {
+  const root = cwd || await workspaceRoot();
+  if (!root || !handoff?.id) return;
+  const inspected = await execute(context, ["inspect", handoff.id], { cwd: root });
+  const detail = inspected.data.handoff;
+  const action = await vscode.window.showInformationMessage(
+    `${detail.author || "Unknown sender"}: ${detail.message || "Handoff changes"} (${detail.file_count} files)`,
+    "Pull"
+  );
+  if (action === "Pull") await pull(context, detail.id, root);
+}
+
+async function pullInboxItem(context, handoff, cwd) {
+  const root = cwd || await workspaceRoot();
+  if (!root || !handoff?.id) return;
+  const confirmation = await vscode.window.showWarningMessage(
+    `Apply Handoff ${handoff.id} from ${handoff.author || "unknown sender"} (${handoff.file_count} files)?`,
+    { modal: true },
+    "Pull"
+  );
+  if (confirmation === "Pull") await pull(context, handoff.id, root);
 }
 
 async function pushChanges(context) {
@@ -203,12 +287,21 @@ function presentError(error) {
 }
 
 function register(context, command, callback) {
-  context.subscriptions.push(vscode.commands.registerCommand(command, () => callback(context).catch(presentError)));
+  context.subscriptions.push(vscode.commands.registerCommand(command, (...args) => callback(context, ...args).catch(presentError)));
 }
 
 function activate(context) {
+  const inbox = new InboxProvider();
+  context.subscriptions.push(inbox);
+  context.subscriptions.push(vscode.window.registerTreeDataProvider("handoff.inbox", inbox));
   register(context, "handoff.configure", configure);
   register(context, "handoff.openInbox", openInbox);
+  register(context, "handoff.refreshInbox", async (extensionContext) => {
+    const count = await inbox.refresh(extensionContext);
+    if (count !== undefined) vscode.window.showInformationMessage(`Handoff inbox refreshed: ${count} available.`);
+  });
+  register(context, "handoff.inspectInboxItem", inspectInboxItem);
+  register(context, "handoff.pullInboxItem", pullInboxItem);
   register(context, "handoff.pushChanges", pushChanges);
   register(context, "handoff.pullHandoff", pullHandoff);
   register(context, "handoff.showRecovery", showRecovery);
