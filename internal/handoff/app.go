@@ -7,6 +7,8 @@ import (
 )
 
 const defaultMaxBytes = int64(100 << 20)
+const defaultMaxStorageBytes = int64(10 << 30)
+const defaultMaxUploads = 4
 
 var Version = "dev"
 

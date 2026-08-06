@@ -5,7 +5,7 @@ This is a platform-specific binary package used by
 Install the main package instead:
 
 ```bash
-npm install --global @walid-baharwal/handoff
+npm install -g @walid-baharwal/handoff
 ```
 
 The application is implemented in Go. This package exists only so npm installs

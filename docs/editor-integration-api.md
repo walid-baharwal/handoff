@@ -125,7 +125,7 @@ as positional arguments.
 
 ```bash
 handoff pull --dry-run --json abcdef123456
-handoff pull --json abcdef123456
+handoff pull --yes --json abcdef123456
 ```
 
 JSON mode requires an explicit ID and never prompts. The result contains

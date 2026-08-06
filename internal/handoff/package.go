@@ -146,7 +146,11 @@ func extractPackage(packagePath, destination string, maxBytes int64) (manifest, 
 				return manifest{}, "", errors.New("invalid handoff manifest")
 			}
 			limited := io.LimitReader(tarReader, header.Size)
-			if err := json.NewDecoder(limited).Decode(&metadata); err != nil {
+			decoder := json.NewDecoder(limited)
+			if err := decoder.Decode(&metadata); err != nil {
+				return manifest{}, "", errors.New("invalid handoff manifest")
+			}
+			if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 				return manifest{}, "", errors.New("invalid handoff manifest")
 			}
 			haveManifest = true
@@ -204,7 +208,7 @@ func validateManifest(value manifest) error {
 	if value.RepositoryID != "" && !repositoryIDPattern.MatchString(value.RepositoryID) {
 		return errors.New("invalid repository ID in handoff manifest")
 	}
-	if value.FileCount < 0 || len(value.Files) > maxListedFiles || value.FileCount < len(value.Files) {
+	if value.FileCount < 0 || value.FileCount > maxIncomingPaths || len(value.Files) > maxListedFiles || value.FileCount < len(value.Files) {
 		return errors.New("invalid file summary in handoff manifest")
 	}
 	for _, path := range value.Files {

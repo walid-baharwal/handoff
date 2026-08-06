@@ -22,7 +22,10 @@ func runServe(args []string, stdout, stderr io.Writer) error {
 	fs.SetOutput(io.Discard)
 	address := fs.String("address", envOr("HANDOFF_ADDRESS", ":8080"), "listen address")
 	if err := fs.Parse(args); err != nil {
-		return err
+		return invalidArguments(err.Error())
+	}
+	if len(fs.Args()) != 0 {
+		return invalidArguments("usage: handoff serve [--address ADDRESS]")
 	}
 	tokenValue := strings.TrimSpace(os.Getenv("HANDOFF_TOKEN"))
 	if len(tokenValue) < 32 {
@@ -31,6 +34,14 @@ func runServe(args []string, stdout, stderr io.Writer) error {
 	maxBytes, err := envInt64("HANDOFF_MAX_BYTES", defaultMaxBytes)
 	if err != nil || maxBytes < 1 {
 		return errors.New("HANDOFF_MAX_BYTES must be a positive integer")
+	}
+	maxStorageBytes, err := envInt64("HANDOFF_MAX_STORAGE_BYTES", defaultMaxStorageBytes)
+	if err != nil || maxStorageBytes < 1 {
+		return errors.New("HANDOFF_MAX_STORAGE_BYTES must be a positive integer")
+	}
+	maxUploads, err := envInt64("HANDOFF_MAX_UPLOADS", defaultMaxUploads)
+	if err != nil || maxUploads < 1 || maxUploads > 100 {
+		return errors.New("HANDOFF_MAX_UPLOADS must be between 1 and 100")
 	}
 	retention, err := time.ParseDuration(envOr("HANDOFF_RETENTION", "720h"))
 	if err != nil || retention <= 0 {
@@ -42,6 +53,8 @@ func runServe(args []string, stdout, stderr io.Writer) error {
 		DataDir:     envOr("HANDOFF_DATA_DIR", "/data"),
 		DownloadDir: envOr("HANDOFF_DOWNLOAD_DIR", "/downloads"),
 		MaxBytes:    maxBytes,
+		MaxStorage:  maxStorageBytes,
+		MaxUploads:  int(maxUploads),
 		Retention:   retention,
 		Logger:      stderr,
 	})

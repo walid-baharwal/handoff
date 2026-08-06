@@ -2,4 +2,8 @@
 /dist/
 /npm/dist/
 /npm/test-binaries/
+/vscode/dist/
+/vscode/test-binaries/
+/vscode/.npm-cache/
+/vscode/node_modules/
 *.handoff
