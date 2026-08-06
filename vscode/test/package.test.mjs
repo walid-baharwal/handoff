@@ -29,5 +29,12 @@ test("accepts release versions and parses packaging arguments", () => {
 
 test("extension manifest whitelists only runtime files", async () => {
   const manifest = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
-  assert.deepEqual(manifest.files, ["extension.js", "lib/**", "bin/**", "README.md", "LICENSE", "CHANGELOG.md"]);
+  assert.deepEqual(manifest.files, ["extension.js", "lib/**", "bin/**", "resources/**", "README.md", "LICENSE", "CHANGELOG.md"]);
+});
+
+test("extension registers the native Handoff inbox view", async () => {
+  const manifest = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
+  assert.deepEqual(manifest.activationEvents, ["onView:handoff.inbox"]);
+  assert.equal(manifest.contributes.viewsContainers.activitybar[0].id, "handoff");
+  assert.equal(manifest.contributes.views.handoff[0].id, "handoff.inbox");
 });
