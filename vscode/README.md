@@ -13,11 +13,18 @@ does not require a global npm installation.
   inspect or pull one.
 - The **Handoff** Activity Bar view keeps the repository inbox one click away;
   use its refresh button to load the latest handoffs, then inspect or pull one.
-- **Handoff: Push Changes** previews the current repository changes and uploads
+- **Handoff: Push All Changes** previews every repository change and uploads
   them after confirmation.
+- **Handoff: Push Selected Changes** previews changed paths, lets you select
+  files, and uploads only that selection.
 - **Handoff: Pull Handoff** lets you enter a handoff ID directly.
 - **Handoff: Show Recovery Status** reports conflicts and provides Continue or
   Abort actions.
+
+Push actions are also available from the Source Control view. Inbox entries
+show complete metadata and changed paths before pull, can copy the Handoff ID,
+and refresh automatically after Handoff operations. Active recovery is shown
+at the top of the inbox.
 
 The token is retained in VS Code Secret Storage. Handoff also saves its normal
 client configuration so the same server works in the terminal.

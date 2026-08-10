@@ -3,6 +3,10 @@
 ## Unreleased
 
 - Added a native Activity Bar inbox with refresh, inspect, and pull actions.
+- Added selected-file pushes and Source Control view actions.
+- Added full handoff inspection, copy-ID actions, automatic refresh, and a
+  visible recovery state.
+- Fixed VSIX packaging from Windows checkout paths containing spaces.
 
 ## 0.2.2 - 2026-08-06
 

@@ -68,8 +68,19 @@
         "icon": "$(cloud-download)"
       },
       {
+        "command": "handoff.copyHandoffID",
+        "title": "Handoff: Copy Handoff ID",
+        "icon": "$(copy)"
+      },
+      {
         "command": "handoff.pushChanges",
-        "title": "Handoff: Push Changes"
+        "title": "Handoff: Push All Changes",
+        "icon": "$(cloud-upload)"
+      },
+      {
+        "command": "handoff.pushSelectedChanges",
+        "title": "Handoff: Push Selected Changes",
+        "icon": "$(list-selection)"
       },
       {
         "command": "handoff.pullHandoff",
@@ -117,11 +128,30 @@
       ]
     },
     "menus": {
+      "commandPalette": [
+        {
+          "command": "handoff.inspectInboxItem",
+          "when": "false"
+        },
+        {
+          "command": "handoff.pullInboxItem",
+          "when": "false"
+        },
+        {
+          "command": "handoff.copyHandoffID",
+          "when": "false"
+        }
+      ],
       "view/title": [
+        {
+          "command": "handoff.pushSelectedChanges",
+          "when": "view == handoff.inbox",
+          "group": "navigation@1"
+        },
         {
           "command": "handoff.refreshInbox",
           "when": "view == handoff.inbox",
-          "group": "navigation"
+          "group": "navigation@2"
         }
       ],
       "view/item/context": [
@@ -134,6 +164,23 @@
           "command": "handoff.inspectInboxItem",
           "when": "view == handoff.inbox && viewItem == handoff.inboxItem",
           "group": "navigation"
+        },
+        {
+          "command": "handoff.copyHandoffID",
+          "when": "view == handoff.inbox && viewItem == handoff.inboxItem",
+          "group": "navigation"
+        }
+      ],
+      "scm/title": [
+        {
+          "command": "handoff.pushSelectedChanges",
+          "when": "scmProvider == git",
+          "group": "navigation@1"
+        },
+        {
+          "command": "handoff.pushChanges",
+          "when": "scmProvider == git",
+          "group": "navigation@2"
         }
       ]
     }
