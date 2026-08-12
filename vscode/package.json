@@ -26,6 +26,7 @@
     "extension.js",
     "lib/**",
     "bin/**",
+    "resources/**",
     "README.md",
     "LICENSE",
     "CHANGELOG.md"
@@ -39,7 +40,9 @@
       "description": "Handoff runs Git commands and changes files in the current repository."
     }
   },
-  "activationEvents": [],
+  "activationEvents": [
+    "onView:handoff.inbox"
+  ],
   "contributes": {
     "commands": [
       {
@@ -51,8 +54,33 @@
         "title": "Handoff: Open Inbox"
       },
       {
+        "command": "handoff.refreshInbox",
+        "title": "Handoff: Refresh Inbox",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "handoff.inspectInboxItem",
+        "title": "Handoff: Inspect Handoff"
+      },
+      {
+        "command": "handoff.pullInboxItem",
+        "title": "Handoff: Pull Handoff",
+        "icon": "$(cloud-download)"
+      },
+      {
+        "command": "handoff.copyHandoffID",
+        "title": "Handoff: Copy Handoff ID",
+        "icon": "$(copy)"
+      },
+      {
         "command": "handoff.pushChanges",
-        "title": "Handoff: Push Changes"
+        "title": "Handoff: Push All Changes",
+        "icon": "$(cloud-upload)"
+      },
+      {
+        "command": "handoff.pushSelectedChanges",
+        "title": "Handoff: Push Selected Changes",
+        "icon": "$(list-selection)"
       },
       {
         "command": "handoff.pullHandoff",
@@ -81,6 +109,80 @@
           "markdownDescription": "Optional path to a Handoff binary. Leave empty to use the binary bundled with this extension."
         }
       }
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "handoff",
+          "title": "Handoff",
+          "icon": "resources/handoff.svg"
+        }
+      ]
+    },
+    "views": {
+      "handoff": [
+        {
+          "id": "handoff.inbox",
+          "name": "Inbox"
+        }
+      ]
+    },
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "handoff.inspectInboxItem",
+          "when": "false"
+        },
+        {
+          "command": "handoff.pullInboxItem",
+          "when": "false"
+        },
+        {
+          "command": "handoff.copyHandoffID",
+          "when": "false"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "handoff.pushSelectedChanges",
+          "when": "view == handoff.inbox",
+          "group": "navigation@1"
+        },
+        {
+          "command": "handoff.refreshInbox",
+          "when": "view == handoff.inbox",
+          "group": "navigation@2"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "handoff.pullInboxItem",
+          "when": "view == handoff.inbox && viewItem == handoff.inboxItem",
+          "group": "inline"
+        },
+        {
+          "command": "handoff.inspectInboxItem",
+          "when": "view == handoff.inbox && viewItem == handoff.inboxItem",
+          "group": "navigation"
+        },
+        {
+          "command": "handoff.copyHandoffID",
+          "when": "view == handoff.inbox && viewItem == handoff.inboxItem",
+          "group": "navigation"
+        }
+      ],
+      "scm/title": [
+        {
+          "command": "handoff.pushSelectedChanges",
+          "when": "scmProvider == git",
+          "group": "navigation@1"
+        },
+        {
+          "command": "handoff.pushChanges",
+          "when": "scmProvider == git",
+          "group": "navigation@2"
+        }
+      ]
     }
   },
   "scripts": {

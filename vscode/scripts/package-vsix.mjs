@@ -5,6 +5,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const vscodeDirectory = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const vsceScript = path.join(vscodeDirectory, "node_modules", "@vscode", "vsce", "vsce");
 const semverPattern = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 
 export const platforms = Object.freeze([
@@ -39,6 +40,10 @@ export function parseArguments(arguments_) {
     binariesDirectory: path.resolve(values.binaries),
     outputDirectory: path.resolve(values.output)
   };
+}
+
+export function vsceInvocation(arguments_, { node = process.execPath, script = vsceScript } = {}) {
+  return { command: node, arguments: [script, ...arguments_] };
 }
 
 async function pathExists(target) {
@@ -80,7 +85,8 @@ export async function packageVSIX({
   version,
   binariesDirectory,
   outputDirectory,
-  packageCommand = path.join(vscodeDirectory, "node_modules", ".bin", process.platform === "win32" ? "vsce.cmd" : "vsce")
+  packageCommand = process.execPath,
+  packageScript = vsceScript
 }) {
   validateVersion(version);
   if (await pathExists(outputDirectory)) {
@@ -93,14 +99,15 @@ export async function packageVSIX({
       const stagingDirectory = path.join(stagingRoot, platform.target);
       await prepareStagingDirectory(platform, version, binariesDirectory, stagingDirectory);
       const outputFile = path.join(outputDirectory, `handoff-${version}-${platform.target}.vsix`);
-      execFileSync(packageCommand, [
+      const invocation = vsceInvocation([
         "package",
         "--no-dependencies",
         "--target",
         platform.target,
         "--out",
         outputFile
-      ], { cwd: stagingDirectory, stdio: "inherit", shell: process.platform === "win32" });
+      ], { node: packageCommand, script: packageScript });
+      execFileSync(invocation.command, invocation.arguments, { cwd: stagingDirectory, stdio: "inherit" });
     }
   } finally {
     await rm(stagingRoot, { recursive: true, force: true });

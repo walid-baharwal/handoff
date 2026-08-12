@@ -141,10 +141,11 @@ stdout, stderr, exit-code, response, and error contract.
 
 ### Visual Studio Code
 
-The Handoff Visual Studio Code extension provides inbox, push, pull, setup, and
-conflict-recovery commands from the Command Palette. It ships as a
-platform-specific VSIX with the matching Go binary included, so users do not
-need to install the npm package globally.
+The Handoff Visual Studio Code extension provides an Activity Bar inbox,
+selected-file pushes from the Source Control view, complete handoff inspection,
+pull, setup, and conflict-recovery commands. It ships as a platform-specific
+VSIX with the matching Go binary included, so users do not need to install the
+npm package globally.
 
 Install it from the Visual Studio Marketplace after the first extension release,
 or use **Extensions: Install from VSIX...** with the matching asset attached to
