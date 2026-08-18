@@ -74,6 +74,9 @@ func TestManifestValidation(t *testing.T) {
 		{Version: packageVersion, BaseCommit: "bad", Commit: valid.Commit, Ref: valid.Ref},
 		{Version: packageVersion, BaseCommit: valid.BaseCommit, Commit: valid.Commit, Ref: "refs/heads/main"},
 		{Version: packageVersion, BaseCommit: valid.BaseCommit, Commit: valid.Commit, Ref: valid.Ref, FileCount: maxIncomingPaths + 1},
+		{Version: packageVersion, BaseCommit: valid.BaseCommit, Commit: valid.Commit, Ref: valid.Ref, Private: true},
+		{Version: packageVersion, BaseCommit: valid.BaseCommit, Commit: valid.Commit, Ref: valid.Ref, Team: strings.Repeat("x", 101)},
+		{Version: packageVersion, BaseCommit: valid.BaseCommit, Commit: valid.Commit, Ref: valid.Ref, FileCount: 1, Files: []string{"app.txt"}, Changes: []fileChange{{Path: "app.txt", Status: "unknown"}}},
 	}
 	for _, value := range cases {
 		if err := validateManifest(value); err == nil {

@@ -1,0 +1,16 @@
+{
+  "name": "@walid-baharwal/handoff-windows-arm64",
+  "version": "0.0.0-development",
+  "private": true,
+  "description": "Handoff native binary for Windows ARM64",
+  "license": "MIT",
+  "os": ["win32"],
+  "cpu": ["arm64"],
+  "files": ["bin/handoff.exe", "README.md", "LICENSE"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/walid-baharwal/handoff.git",
+    "directory": "npm/platforms/windows-arm64"
+  },
+  "publishConfig": { "access": "public" }
+}

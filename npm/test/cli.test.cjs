@@ -12,6 +12,7 @@ const expectedTargets = [
   ["darwin", "x64", "@walid-baharwal/handoff-darwin-x64", "handoff"],
   ["darwin", "arm64", "@walid-baharwal/handoff-darwin-arm64", "handoff"],
   ["win32", "x64", "@walid-baharwal/handoff-windows-x64", "handoff.exe"],
+  ["win32", "arm64", "@walid-baharwal/handoff-windows-arm64", "handoff.exe"],
 ];
 
 test("maps every release target to its native package", () => {

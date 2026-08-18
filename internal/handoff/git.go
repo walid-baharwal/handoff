@@ -46,6 +46,12 @@ const (
 
 type pushMode string
 
+type sharingOptions struct {
+	Team       string
+	Recipients []string
+	Private    bool
+}
+
 const (
 	pushModeAll      pushMode = "all"
 	pushModeStaged   pushMode = "staged"
@@ -65,6 +71,10 @@ func buildHandoffPackage(packagePath, message string, paths []string) (manifest,
 }
 
 func buildHandoffPackageFromPaths(root, packagePath, message string, paths []string, mode pushMode) (manifest, error) {
+	return buildHandoffPackageFromPathsWithSharing(root, packagePath, message, paths, mode, sharingOptions{})
+}
+
+func buildHandoffPackageFromPathsWithSharing(root, packagePath, message string, paths []string, mode pushMode, sharing sharingOptions) (manifest, error) {
 	releaseLock, err := acquireOperationLock(root)
 	if err != nil {
 		return manifest{}, err
@@ -81,6 +91,10 @@ func buildHandoffPackageFromPaths(root, packagePath, message string, paths []str
 	message = strings.TrimSpace(message)
 	if len(message) > 500 {
 		return manifest{}, invalidArguments("message cannot exceed 500 characters")
+	}
+	working, err := workingChanges(root)
+	if err != nil {
+		return manifest{}, err
 	}
 	base, err := gitOutput(root, nil, "rev-parse", "HEAD")
 	if err != nil {
@@ -155,6 +169,10 @@ func buildHandoffPackageFromPaths(root, packagePath, message string, paths []str
 		listedFiles = listedFiles[:maxListedFiles]
 		filesTruncated = true
 	}
+	listedChanges := selectedChangeSummaries(working, changed)
+	if len(listedChanges) > maxListedFiles {
+		listedChanges = listedChanges[:maxListedFiles]
+	}
 	commitMessage := message
 	if commitMessage == "" {
 		commitMessage = "Handoff changes"
@@ -203,6 +221,10 @@ func buildHandoffPackageFromPaths(root, packagePath, message string, paths []str
 		FileCount:      len(changed),
 		Files:          append([]string(nil), listedFiles...),
 		FilesTruncated: filesTruncated,
+		Changes:        listedChanges,
+		Team:           sharing.Team,
+		Recipients:     append([]string(nil), sharing.Recipients...),
+		Private:        sharing.Private,
 	}
 	if err := createPackage(packagePath, bundlePath, metadata); err != nil {
 		return manifest{}, err
@@ -898,6 +920,16 @@ func validateFileSummary(metadata manifest, paths []string) error {
 			return errors.New("handoff file summary contains duplicate paths")
 		}
 		seen[path] = struct{}{}
+	}
+	for _, change := range metadata.Changes {
+		if _, exists := actual[change.Path]; !exists {
+			return errors.New("handoff change summary does not match its Git changes")
+		}
+		if change.OriginalPath != "" {
+			if _, exists := actual[change.OriginalPath]; !exists {
+				return errors.New("handoff rename summary does not match its Git changes")
+			}
+		}
 	}
 	return nil
 }

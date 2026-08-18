@@ -21,6 +21,7 @@ ldflags="-s -w -X handoff/internal/handoff.Version=$version"
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="$ldflags" -o "$output_directory/handoff-linux-amd64" ./cmd/handoff
 CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="$ldflags" -o "$output_directory/handoff-linux-arm64" ./cmd/handoff
 CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="$ldflags" -o "$output_directory/handoff-windows-amd64.exe" ./cmd/handoff
+CGO_ENABLED=0 GOOS=windows GOARCH=arm64 go build -trimpath -ldflags="$ldflags" -o "$output_directory/handoff-windows-arm64.exe" ./cmd/handoff
 CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags="$ldflags" -o "$output_directory/handoff-darwin-amd64" ./cmd/handoff
 CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags="$ldflags" -o "$output_directory/handoff-darwin-arm64" ./cmd/handoff
 

@@ -38,8 +38,12 @@ func runPush(args []string, stdin io.Reader, stdout io.Writer) error {
 	interactive := fs.Bool("interactive", false, "select changed paths interactively")
 	staged := fs.Bool("staged", false, "include staged changes only")
 	worktree := fs.Bool("worktree", false, "include worktree changes only")
+	team := fs.String("team", "", "share with a team or channel")
+	private := fs.Bool("private", false, "restrict visibility to recipients or the selected team")
 	var excludes stringListFlag
+	var recipients stringListFlag
 	fs.Var(&excludes, "exclude", "exclude a file or directory (repeatable)")
+	fs.Var(&recipients, "to", "share with a user ID or email (repeatable)")
 	if err := fs.Parse(args); err != nil {
 		return invalidArguments(err.Error())
 	}
@@ -48,6 +52,18 @@ func runPush(args []string, stdin io.Reader, stdout io.Writer) error {
 	}
 	if *interactive && *jsonOutput {
 		return invalidArguments("--interactive and --json cannot be used together")
+	}
+	if *private && len(recipients) == 0 && strings.TrimSpace(*team) == "" {
+		return invalidArguments("--private requires --to or --team")
+	}
+	if len(recipients) > 50 {
+		return invalidArguments("a handoff cannot have more than 50 recipients")
+	}
+	for index := range recipients {
+		recipients[index] = strings.TrimSpace(strings.ToLower(recipients[index]))
+		if len(recipients[index]) > 254 {
+			return invalidArguments("recipient identifiers cannot exceed 254 characters")
+		}
 	}
 	mode := pushModeAll
 	if *staged {
@@ -88,7 +104,11 @@ func runPush(args []string, stdin io.Reader, stdout io.Writer) error {
 	}
 	defer os.RemoveAll(tmpDir)
 	packagePath := filepath.Join(tmpDir, "changes.handoff")
-	metadata, err := buildHandoffPackageFromPaths(root, packagePath, *message, selectedPaths, mode)
+	metadata, err := buildHandoffPackageFromPathsWithSharing(root, packagePath, *message, selectedPaths, mode, sharingOptions{
+		Team:       strings.TrimSpace(strings.ToLower(*team)),
+		Recipients: recipients,
+		Private:    *private,
+	})
 	if err != nil {
 		return err
 	}
@@ -349,21 +369,28 @@ func runPull(args []string, stdin io.Reader, stdout io.Writer) error {
 		fmt.Fprintln(stdout)
 		printHandoffMetadata(stdout, selected)
 	}
+	_, _ = postHandoffEvent(cfg, id, "read", "", "")
 	if *dryRun {
 		if selected.ID == "" {
 			return errors.New("handoff metadata is unavailable; the server may predate inbox support")
 		}
 		if *jsonOutput {
+			compatibility, err := inspectCompatibility(selected)
+			if err != nil {
+				return err
+			}
 			return writeIntegrationJSON(stdout, "pull", struct {
-				Status  string             `json:"status"`
-				DryRun  bool               `json:"dry_run"`
-				Applied bool               `json:"applied"`
-				Handoff integrationHandoff `json:"handoff"`
+				Status        string              `json:"status"`
+				DryRun        bool                `json:"dry_run"`
+				Applied       bool                `json:"applied"`
+				Handoff       integrationHandoff  `json:"handoff"`
+				Compatibility compatibilityReport `json:"compatibility"`
 			}{
-				Status:  "previewed",
-				DryRun:  true,
-				Applied: false,
-				Handoff: integrationHandoffFromMetadata(selected),
+				Status:        "previewed",
+				DryRun:        true,
+				Applied:       false,
+				Handoff:       integrationHandoffFromMetadata(selected),
+				Compatibility: compatibility,
 			})
 		}
 		fmt.Fprintln(stdout, "\nDry run complete; no files were changed.")
@@ -395,6 +422,7 @@ func runPull(args []string, stdin io.Reader, stdout io.Writer) error {
 	if err := applyHandoffPackage(id, packagePath, tmpDir, applyOutput); err != nil {
 		return err
 	}
+	_, _ = postHandoffEvent(cfg, id, "applied", "", "")
 	if *jsonOutput {
 		return writeIntegrationJSON(stdout, "pull", struct {
 			Status   string             `json:"status"`
@@ -507,8 +535,10 @@ func responseError(prefix string, resp *http.Response) error {
 	}
 	code := "server_error"
 	switch resp.StatusCode {
-	case http.StatusUnauthorized, http.StatusForbidden:
+	case http.StatusUnauthorized:
 		code = "authentication_failed"
+	case http.StatusForbidden:
+		code = "access_denied"
 	case http.StatusNotFound:
 		code = "not_found"
 	case http.StatusConflict:

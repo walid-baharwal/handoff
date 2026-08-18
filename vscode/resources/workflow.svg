@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="250" viewBox="0 0 880 250" role="img" aria-labelledby="title description">
+  <title id="title">Handoff workflow</title>
+  <desc id="description">Files move into a Handoff draft, the sender creates it, and a matching repository receives it from the Inbox.</desc>
+  <style>
+    text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #dce4ee }
+    .panel { fill: #111820; stroke: #344152; stroke-width: 2 }
+    .accent { fill: #67e8a5 }
+    .muted { fill: #93a2b5 }
+    .file { animation: include 6s ease-in-out infinite }
+    .packet { animation: send 6s ease-in-out infinite }
+    @keyframes include { 0%,12% { transform: translate(0,0) } 28%,100% { transform: translate(0,-46px) } }
+    @keyframes send { 0%,38% { transform: translate(0,0); opacity: 0 } 45% { opacity: 1 } 72%,100% { transform: translate(286px,0); opacity: 1 } }
+  </style>
+  <rect width="880" height="250" rx="18" fill="#0b0f14"/>
+  <rect class="panel" x="24" y="24" width="252" height="202" rx="13"/>
+  <text x="44" y="52" font-size="15" font-weight="700">HANDOFF: API</text>
+  <rect x="44" y="68" width="212" height="34" rx="7" fill="#0a0e13" stroke="#2c3949"/>
+  <text x="56" y="90" font-size="12" class="muted">Message for this Handoff…</text>
+  <text x="44" y="128" font-size="11" class="muted">INCLUDED IN HANDOFF</text>
+  <g class="file">
+    <text x="50" y="192" font-size="13">M  src/chat/controller.ts</text>
+    <circle cx="244" cy="187" r="10" fill="#263447"/>
+    <text x="240" y="192" font-size="15" class="accent">+</text>
+  </g>
+  <text x="44" y="174" font-size="11" class="muted">CHANGES</text>
+  <rect class="panel" x="604" y="24" width="252" height="202" rx="13"/>
+  <text x="624" y="52" font-size="15" font-weight="700">HANDOFF INBOX</text>
+  <text x="624" y="86" font-size="12" class="muted">API · compatible</text>
+  <rect x="624" y="102" width="212" height="54" rx="8" fill="#17212c"/>
+  <text x="638" y="124" font-size="13">Fix conversation access</text>
+  <text x="638" y="144" font-size="11" class="muted">Saif · 1 file · now</text>
+  <path d="M300 126H580" stroke="#344152" stroke-width="2" stroke-dasharray="6 6"/>
+  <g class="packet">
+    <rect x="312" y="99" width="78" height="54" rx="10" class="accent"/>
+    <text x="329" y="132" font-size="13" font-weight="700" fill="#07110d">HANDOFF</text>
+  </g>
+  <text x="342" y="190" font-size="12" class="muted">Create → team inbox → safe pull</text>
+</svg>

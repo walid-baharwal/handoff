@@ -11,7 +11,7 @@ passing `--json`.
 - A failed command exits with a nonzero code and writes one JSON error object to
   standard error. It does not prefix the error with `handoff:` or write a
   partial JSON result to standard output.
-- `schema_version` is currently `1`. A breaking JSON contract change requires a
+- `schema_version` is currently `2`. A breaking JSON contract change requires a
   new schema version.
 - Timestamps are UTC RFC 3339 strings. Collections such as `files` and
   `conflicted_files` are empty arrays rather than `null`.
@@ -22,7 +22,7 @@ Every result uses this envelope:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "command": "inspect",
   "data": {}
 }
@@ -32,7 +32,7 @@ Every failure uses this envelope:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "command": "pull",
   "error": {
     "code": "not_found",
@@ -55,6 +55,7 @@ Current codes include:
 | `git_operation_active` | Another merge, cherry-pick, revert, or rebase is active. |
 | `no_changes` | No changes matched the requested push selection. |
 | `authentication_failed` | The server rejected the configured token. |
+| `access_denied` | The authenticated user is not allowed to perform the operation. |
 | `server_unavailable` | The server could not be reached. |
 | `not_found` | The requested handoff does not exist. |
 | `server_conflict` | The server rejected the operation because of its current state. |
@@ -73,6 +74,18 @@ compatible releases.
 
 ## Commands
 
+### Repository changes
+
+```bash
+handoff changes --json
+```
+
+Returns `data.repository` (`root`, `project`, `repository_id`, `branch`, and
+`head`) and one `data.changes` array. Each change contains its path, optional
+rename source, status, byte size, content ID, binary/staged/worktree flags, and
+whether the current Handoff package format supports it. This is the preferred single-call
+contract for editor Source Control providers.
+
 ### Inbox
 
 ```bash
@@ -87,7 +100,7 @@ inbox.
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "command": "list",
   "data": {
     "scope": "repository",
@@ -105,8 +118,9 @@ inbox.
 handoff inspect --json abcdef123456
 ```
 
-The result is in `data.handoff`. Sender name and email originate from the
-sender's Git configuration and are self-reported.
+The result is in `data.handoff`. Shared-token servers use the sender's
+self-reported Git identity. Per-user servers bind owner, name, and email to the
+authenticated token.
 
 ### Preview and push
 
@@ -130,14 +144,17 @@ handoff pull --yes --json abcdef123456
 
 JSON mode requires an explicit ID and never prompts. The result contains
 `data.status`, `data.dry_run`, `data.applied`, `data.handoff`, and, after an
-apply, `data.recovery`.
+apply, `data.recovery`. A dry run also includes `data.compatibility` with the
+local repository identity, repository/branch/base checks, local changes,
+likely path conflicts, warnings, and a `low`, `medium`, `high`, or `blocked`
+risk classification.
 
 If Git reports conflicts, the process exits nonzero with code `conflict`. The
 error includes current recovery state:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "command": "pull",
   "error": {
     "code": "conflict",
@@ -178,3 +195,26 @@ printf '%s\n' "$HANDOFF_TOKEN" | handoff setup --server https://handoff.example.
 `--token-stdin` reads one line without printing a prompt. It takes precedence
 over `HANDOFF_TOKEN` and cannot be combined with the legacy `--token` flag.
 Do not log the spawned process's standard input.
+
+### Collaboration
+
+Servers configured with per-user tokens expose stable JSON for identity,
+comments, lifecycle, ownership, assignment, archive, audit, and outbox flows:
+
+```bash
+handoff whoami --json
+handoff list --all --sent --json
+handoff comment --json ID "I will apply this"
+handoff comments --json ID
+handoff acknowledge --json ID
+handoff applied --json ID
+handoff assign --target USER --json ID
+handoff read|unread|archive|unarchive --json ID
+handoff revoke --json ID
+handoff audit --json ID
+```
+
+Handoff records can include `owner_id`, `team`, `recipients`, `private`,
+`assigned_to`, `lifecycle`, acknowledgement/applied identities, comment count,
+and viewer read/archive state. Older records omit fields they do not have;
+clients must retain the documented fallback behaviour.

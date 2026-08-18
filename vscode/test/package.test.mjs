@@ -10,7 +10,8 @@ test("maps every release binary to a VS Code target", () => {
     "linux-arm64",
     "darwin-x64",
     "darwin-arm64",
-    "win32-x64"
+    "win32-x64",
+    "win32-arm64"
   ]);
   assert.equal(new Set(platforms.map((platform) => platform.sourceBinary)).size, platforms.length);
 });
@@ -34,7 +35,7 @@ test("extension manifest whitelists only runtime files", async () => {
 
 test("extension registers the native Handoff inbox view", async () => {
   const manifest = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
-  assert.deepEqual(manifest.activationEvents, ["onView:handoff.inbox"]);
+  assert.deepEqual(manifest.activationEvents, ["onStartupFinished", "onView:handoff.inbox", "onUri"]);
   assert.equal(manifest.contributes.viewsContainers.activitybar[0].id, "handoff");
   assert.equal(manifest.contributes.views.handoff[0].id, "handoff.inbox");
 });
@@ -49,17 +50,21 @@ test("invokes VSCE through Node without shell path parsing", () => {
   });
 });
 
-test("extension contributes selected push and Source Control actions", async () => {
+test("extension contributes native multi-repository Source Control actions", async () => {
   const manifest = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
   const commands = new Set(manifest.contributes.commands.map(({ command }) => command));
   assert.ok(commands.has("handoff.pushSelectedChanges"));
   assert.ok(commands.has("handoff.copyHandoffID"));
+  assert.ok(commands.has("handoff.create"));
+  assert.ok(commands.has("handoff.include"));
+  assert.ok(commands.has("handoff.exclude"));
+  assert.ok(commands.has("handoff.refreshRepositoryInbox"));
+  assert.ok(commands.has("handoff.unarchive"));
+  assert.ok(commands.has("handoff.setExpiry"));
   assert.deepEqual(
     manifest.contributes.menus["scm/title"].map(({ command }) => command),
-    ["handoff.pushSelectedChanges", "handoff.pushChanges"]
+    ["handoff.create", "handoff.refreshChanges", "handoff.includeAll", "handoff.excludeAll", "handoff.discardDraft", "handoff.setAudience"]
   );
-  assert.deepEqual(
-    manifest.contributes.menus.commandPalette.map(({ command }) => command),
-    ["handoff.inspectInboxItem", "handoff.pullInboxItem", "handoff.copyHandoffID"]
-  );
+  assert.ok(manifest.contributes.menus["scm/resourceState/context"].some(({ command }) => command === "handoff.include"));
+  assert.ok(manifest.contributes.menus["scm/resourceState/context"].some(({ command }) => command === "handoff.exclude"));
 });

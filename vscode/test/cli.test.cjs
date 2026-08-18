@@ -20,6 +20,7 @@ function fakeSpawn({ stdout = "", stderr = "", exitCode = 0 }) {
     child.stdout = new EventEmitter();
     child.stderr = new EventEmitter();
     child.stdin = { end: (value) => { child.input = value; } };
+    child.kill = () => { child.killed = true; };
     process.nextTick(() => {
       if (options.stdio[0] === "pipe") child.stdin.end = (value) => { child.input = value; };
       if (stdout) child.stdout.emit("data", Buffer.from(stdout));
@@ -34,6 +35,30 @@ test("maps supported platforms to bundled binary paths", () => {
   assert.match(bundledBinaryPath("/extension", "linux", "x64"), /bin[\\/]handoff$/);
   assert.match(bundledBinaryPath("C:\\extension", "win32", "x64"), /bin[\\/]handoff\.exe$/);
   assert.throws(() => bundledBinaryPath("/extension", "freebsd", "x64"), /does not support/);
+});
+
+test("rejects an unsupported integration schema", async () => {
+  await assert.rejects(
+    runHandoff("handoff", ["list"], {
+      spawnCommand: fakeSpawn({ stdout: JSON.stringify({ schema_version: 99, command: "list", data: {} }) })
+    }),
+    (error) => error instanceof HandoffCommandError && error.code === "unsupported_schema"
+  );
+});
+
+test("cancels commands that exceed their timeout", async () => {
+  const spawnCommand = () => {
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.stdin = { end() {} };
+    child.kill = () => { child.killed = true; };
+    return child;
+  };
+  await assert.rejects(
+    runHandoff("handoff", ["list"], { spawnCommand, timeoutMs: 5 }),
+    (error) => error instanceof HandoffCommandError && error.code === "timeout" && error.retryable
+  );
 });
 
 test("honors an explicit development binary path", () => {

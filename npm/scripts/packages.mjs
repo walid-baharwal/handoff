@@ -42,6 +42,14 @@ export const platforms = Object.freeze([
     sourceBinary: "handoff-windows-amd64.exe",
     targetBinary: "handoff.exe",
   }),
+  Object.freeze({
+    id: "windows-arm64",
+    packageName: `${packageScope}/handoff-windows-arm64`,
+    os: "win32",
+    cpu: "arm64",
+    sourceBinary: "handoff-windows-arm64.exe",
+    targetBinary: "handoff.exe",
+  }),
 ]);
 
 export function packageDirectories(outputDirectory) {

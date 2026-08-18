@@ -15,6 +15,9 @@ handoff push  ── package ──> stores package ── ID ──────
 - One command to upload changes and one command to apply them.
 - Interactive, staged-only, worktree-only, exclusion, and dry-run push workflows.
 - Repository-scoped team inbox with sender, branch, message, and file summary.
+- Native VS Code Source Control drafts with multi-repository management.
+- Optional per-user tokens, private recipients/teams, assignment, comments,
+  lifecycle state, revoke, read/archive state, and audit history.
 - Transfers tracked, untracked, deleted, staged, and unstaged files.
 - Sends all changes or only selected paths.
 - Uses Git's three-way merge and reports normal Git conflicts.
@@ -56,6 +59,7 @@ Download the binary for your system from the repository's **Releases** page:
 | Linux x86-64 | `handoff-linux-amd64` |
 | Linux ARM64 | `handoff-linux-arm64` |
 | Windows x86-64 | `handoff-windows-amd64.exe` |
+| Windows ARM64 | `handoff-windows-arm64.exe` |
 | macOS Intel | `handoff-darwin-amd64` |
 | macOS Apple Silicon | `handoff-darwin-arm64` |
 
@@ -141,9 +145,10 @@ stdout, stderr, exit-code, response, and error contract.
 
 ### Visual Studio Code
 
-The Handoff Visual Studio Code extension provides an Activity Bar inbox,
-selected-file pushes from the Source Control view, complete handoff inspection,
-pull, setup, and conflict-recovery commands. It ships as a platform-specific
+The Handoff Visual Studio Code extension provides one native Handoff Source
+Control provider per Git repository, persistent file/message drafts, rich
+diffs and statuses, a multi-repository Activity Bar inbox, safe pull previews,
+collaboration actions, setup profiles, and conflict recovery. It ships as a platform-specific
 VSIX with the matching Go binary included, so users do not need to install the
 npm package globally.
 
@@ -191,7 +196,8 @@ The Compose volume `handoff_data` keeps uploaded packages across restarts.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `HANDOFF_TOKEN` | required | Shared bearer token, minimum 32 characters |
+| `HANDOFF_TOKEN` | required unless `HANDOFF_USERS` is set | Legacy shared administrator token, minimum 32 characters |
+| `HANDOFF_USERS` | empty | Optional JSON array of per-user tokens, identities, roles, and teams |
 | `HANDOFF_ADDRESS` | `:8080` | Server listen address |
 | `HANDOFF_DATA_DIR` | `/data` | Package storage directory |
 | `HANDOFF_DOWNLOAD_DIR` | `/downloads` | Client binary download directory |
