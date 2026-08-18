@@ -3,7 +3,7 @@
 Create and receive Handoffs without leaving VS Code. The extension bundles the
 native Go client; a global npm installation is not required.
 
-![Files move into a Handoff draft and then into a compatible repository Inbox](resources/workflow.svg)
+![Files move into a Handoff draft and then into a compatible repository Inbox](resources/workflow.png)
 
 ## Create a Handoff
 
