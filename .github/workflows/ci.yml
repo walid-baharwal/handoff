@@ -47,6 +47,7 @@ jobs:
       - run: go test ./...
       - run: go vet ./...
       - run: npm test --prefix npm
+      - run: npm ci --prefix vscode
       - run: npm test --prefix vscode
       - if: runner.os == 'Linux'
         run: docker build -t handoff:test .
@@ -60,5 +61,4 @@ jobs:
       - if: runner.os == 'Linux'
         name: Build VS Code extension packages
         run: |
-          npm ci --prefix vscode
           node vscode/scripts/package-vsix.mjs --version 0.0.0-ci --binaries npm/test-binaries --output vscode/dist
