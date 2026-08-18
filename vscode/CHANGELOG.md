@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Added a native Handoff Source Control provider for every discovered Git repository.
+- Added persistent per-repository drafts with include/remove actions, message input, audiences, diffs, file status, safety warnings, and exact previews.
+- Rebuilt the Inbox for multiple repositories with safe target matching, search, filters, sorting, badges, background notifications, and deep links.
+- Added pull compatibility previews, conflict recovery actions, cancellation, timeouts, diagnostics, onboarding, server profiles, and remote-workspace support.
+- Added optional recipients, teams, private Handoffs, assignment, comments, acknowledgement/applied state, outbox, read/archive state, expiry, revoke, and audit history.
 - Added a native Activity Bar inbox with refresh, inspect, and pull actions.
 - Added selected-file pushes and Source Control view actions.
 - Added full handoff inspection, copy-ID actions, automatic refresh, and a

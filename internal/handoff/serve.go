@@ -3,6 +3,7 @@ package handoff
 import (
 	"context"
 	"crypto/subtle"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -28,8 +29,9 @@ func runServe(args []string, stdout, stderr io.Writer) error {
 		return invalidArguments("usage: handoff serve [--address ADDRESS]")
 	}
 	tokenValue := strings.TrimSpace(os.Getenv("HANDOFF_TOKEN"))
-	if len(tokenValue) < 32 {
-		return errors.New("HANDOFF_TOKEN must contain at least 32 characters")
+	users, err := configuredUsers(os.Getenv("HANDOFF_USERS"))
+	if len(tokenValue) < 32 && len(users) == 0 {
+		return errors.New("HANDOFF_TOKEN must contain at least 32 characters or HANDOFF_USERS must configure user tokens")
 	}
 	maxBytes, err := envInt64("HANDOFF_MAX_BYTES", defaultMaxBytes)
 	if err != nil || maxBytes < 1 {
@@ -50,6 +52,7 @@ func runServe(args []string, stdout, stderr io.Writer) error {
 
 	service, err := newService(serviceConfig{
 		Token:       tokenValue,
+		Users:       users,
 		DataDir:     envOr("HANDOFF_DATA_DIR", "/data"),
 		DownloadDir: envOr("HANDOFF_DOWNLOAD_DIR", "/downloads"),
 		MaxBytes:    maxBytes,
@@ -84,6 +87,51 @@ func runServe(args []string, stdout, stderr io.Writer) error {
 		return nil
 	}
 	return err
+}
+
+type configuredUser struct {
+	Token string   `json:"token"`
+	ID    string   `json:"id"`
+	Name  string   `json:"name"`
+	Email string   `json:"email"`
+	Role  string   `json:"role"`
+	Teams []string `json:"teams"`
+}
+
+func configuredUsers(raw string) ([]configuredUser, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	var users []configuredUser
+	if err := json.Unmarshal([]byte(raw), &users); err != nil {
+		return nil, fmt.Errorf("HANDOFF_USERS must be a JSON array: %w", err)
+	}
+	seenIDs := make(map[string]struct{})
+	seenTokens := make(map[string]struct{})
+	for index := range users {
+		user := &users[index]
+		user.ID = strings.ToLower(strings.TrimSpace(user.ID))
+		user.Email = strings.ToLower(strings.TrimSpace(user.Email))
+		user.Role = strings.ToLower(strings.TrimSpace(user.Role))
+		if user.Role == "" {
+			user.Role = "member"
+		}
+		if len(user.Token) < 32 || user.ID == "" || (user.Role != "member" && user.Role != "admin") {
+			return nil, fmt.Errorf("HANDOFF_USERS entry %d requires a unique ID, a 32-character token, and role member or admin", index+1)
+		}
+		if _, found := seenIDs[user.ID]; found {
+			return nil, fmt.Errorf("HANDOFF_USERS contains duplicate ID %q", user.ID)
+		}
+		if _, found := seenTokens[user.Token]; found {
+			return nil, errors.New("HANDOFF_USERS contains duplicate tokens")
+		}
+		seenIDs[user.ID] = struct{}{}
+		seenTokens[user.Token] = struct{}{}
+		for teamIndex := range user.Teams {
+			user.Teams[teamIndex] = strings.ToLower(strings.TrimSpace(user.Teams[teamIndex]))
+		}
+	}
+	return users, nil
 }
 
 func envOr(name, fallback string) string {

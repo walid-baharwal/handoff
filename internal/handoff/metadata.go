@@ -15,26 +15,41 @@ const maxListedFiles = 200
 var repositoryIDPattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
 
 type handoffMetadata struct {
-	ID             string    `json:"id"`
-	Project        string    `json:"project,omitempty"`
-	RepositoryID   string    `json:"repository_id,omitempty"`
-	Branch         string    `json:"branch,omitempty"`
-	Author         string    `json:"author,omitempty"`
-	AuthorEmail    string    `json:"author_email,omitempty"`
-	Message        string    `json:"message,omitempty"`
-	BaseCommit     string    `json:"base_commit"`
-	Commit         string    `json:"commit"`
-	CreatedAt      time.Time `json:"created_at"`
-	StoredAt       time.Time `json:"stored_at"`
-	ExpiresAt      time.Time `json:"expires_at"`
-	FileCount      int       `json:"file_count"`
-	Files          []string  `json:"files,omitempty"`
-	FilesTruncated bool      `json:"files_truncated,omitempty"`
-	PackageBytes   int64     `json:"package_bytes"`
+	ID             string       `json:"id"`
+	Project        string       `json:"project,omitempty"`
+	RepositoryID   string       `json:"repository_id,omitempty"`
+	Branch         string       `json:"branch,omitempty"`
+	Author         string       `json:"author,omitempty"`
+	AuthorEmail    string       `json:"author_email,omitempty"`
+	Message        string       `json:"message,omitempty"`
+	BaseCommit     string       `json:"base_commit"`
+	Commit         string       `json:"commit"`
+	CreatedAt      time.Time    `json:"created_at"`
+	StoredAt       time.Time    `json:"stored_at"`
+	ExpiresAt      time.Time    `json:"expires_at"`
+	FileCount      int          `json:"file_count"`
+	Files          []string     `json:"files,omitempty"`
+	FilesTruncated bool         `json:"files_truncated,omitempty"`
+	Changes        []fileChange `json:"changes,omitempty"`
+	OwnerID        string       `json:"owner_id,omitempty"`
+	Team           string       `json:"team,omitempty"`
+	Recipients     []string     `json:"recipients,omitempty"`
+	Private        bool         `json:"private,omitempty"`
+	AssignedTo     string       `json:"assigned_to,omitempty"`
+	Lifecycle      string       `json:"lifecycle,omitempty"`
+	AcknowledgedBy []string     `json:"acknowledged_by,omitempty"`
+	AppliedBy      []string     `json:"applied_by,omitempty"`
+	RevokedAt      time.Time    `json:"revoked_at,omitempty"`
+	CommentsCount  int          `json:"comments_count,omitempty"`
+	ViewerRead     bool         `json:"viewer_read,omitempty"`
+	ViewerArchived bool         `json:"viewer_archived,omitempty"`
+	PackageBytes   int64        `json:"package_bytes"`
 }
 
 type handoffListResponse struct {
-	Handoffs []handoffMetadata `json:"handoffs"`
+	Handoffs   []handoffMetadata `json:"handoffs"`
+	NextOffset int               `json:"next_offset,omitempty"`
+	HasMore    bool              `json:"has_more,omitempty"`
 }
 
 func metadataFromManifest(id string, value manifest, storedAt, expiresAt time.Time, packageBytes int64) handoffMetadata {
@@ -54,6 +69,11 @@ func metadataFromManifest(id string, value manifest, storedAt, expiresAt time.Ti
 		FileCount:      value.FileCount,
 		Files:          append([]string(nil), value.Files...),
 		FilesTruncated: value.FilesTruncated,
+		Changes:        append([]fileChange(nil), value.Changes...),
+		Team:           value.Team,
+		Recipients:     append([]string(nil), value.Recipients...),
+		Private:        value.Private,
+		Lifecycle:      "available",
 		PackageBytes:   packageBytes,
 	}
 }

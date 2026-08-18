@@ -55,6 +55,46 @@ func TestPushJSONPreviewHasStableEnvelope(t *testing.T) {
 	}
 }
 
+func TestChangesJSONReportsRepositoryAndRichFileStates(t *testing.T) {
+	repository, _ := clonePair(t)
+	writeFile(t, filepath.Join(repository, "app.txt"), "modified\n")
+	writeFile(t, filepath.Join(repository, "new.txt"), "new\n")
+	writeFile(t, filepath.Join(repository, "binary.dat"), "a\x00b")
+	if err := os.Rename(filepath.Join(repository, "delete.txt"), filepath.Join(repository, "renamed.txt")); err != nil {
+		t.Fatal(err)
+	}
+	git(t, repository, "add", "app.txt")
+
+	var raw json.RawMessage
+	inDirectory(t, repository, func() {
+		raw = runJSONCommand(t, []string{"changes", "--json"}, "changes")
+	})
+	var data struct {
+		Repository repositoryInfo `json:"repository"`
+		Changes    []fileChange   `json:"changes"`
+	}
+	decodeIntegrationData(t, raw, &data)
+	if data.Repository.Root == "" || data.Repository.RepositoryID == "" || data.Repository.Branch == "" {
+		t.Fatalf("missing repository identity: %#v", data.Repository)
+	}
+	byPath := make(map[string]fileChange)
+	for _, change := range data.Changes {
+		byPath[change.Path] = change
+	}
+	if change := byPath["app.txt"]; change.Status != "modified" || !change.Staged || change.ContentID == "" {
+		t.Fatalf("unexpected modified change: %#v", change)
+	}
+	if change := byPath["new.txt"]; change.Status != "untracked" || !change.Worktree || change.ContentID == "" {
+		t.Fatalf("unexpected untracked change: %#v", change)
+	}
+	if change := byPath["binary.dat"]; !change.Binary || change.SizeBytes != 3 {
+		t.Fatalf("unexpected binary change: %#v", change)
+	}
+	if change := byPath["renamed.txt"]; change.Status != "renamed" || change.OriginalPath != "delete.txt" {
+		t.Fatalf("unexpected rename change: %#v", change)
+	}
+}
+
 func TestJSONErrorsAreStructuredAndReportedOnce(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	err := Run(
@@ -155,13 +195,19 @@ func TestInboxInspectAndPullJSONWorkflow(t *testing.T) {
 	inDirectory(t, receiver, func() {
 		listData := runJSONCommand(t, []string{"list", "--json"}, "list")
 		var list struct {
-			Scope    string               `json:"scope"`
-			Limit    int                  `json:"limit"`
-			Handoffs []integrationHandoff `json:"handoffs"`
+			Scope      string               `json:"scope"`
+			Limit      int                  `json:"limit"`
+			Offset     int                  `json:"offset"`
+			NextOffset int                  `json:"next_offset"`
+			HasMore    bool                 `json:"has_more"`
+			Handoffs   []integrationHandoff `json:"handoffs"`
 		}
 		decodeIntegrationData(t, listData, &list)
 		if list.Scope != "repository" || list.Limit != 20 || len(list.Handoffs) != 1 || list.Handoffs[0].ID != id {
 			t.Fatalf("unexpected list result: %#v", list)
+		}
+		if list.Offset != 0 || list.NextOffset != 1 || list.HasMore {
+			t.Fatalf("unexpected list pagination: %#v", list)
 		}
 
 		inspectData := runJSONCommand(t, []string{"inspect", "--json", id}, "inspect")
@@ -175,13 +221,17 @@ func TestInboxInspectAndPullJSONWorkflow(t *testing.T) {
 
 		previewData := runJSONCommand(t, []string{"pull", "--dry-run", "--json", id}, "pull")
 		var preview struct {
-			Status  string `json:"status"`
-			DryRun  bool   `json:"dry_run"`
-			Applied bool   `json:"applied"`
+			Status        string              `json:"status"`
+			DryRun        bool                `json:"dry_run"`
+			Applied       bool                `json:"applied"`
+			Compatibility compatibilityReport `json:"compatibility"`
 		}
 		decodeIntegrationData(t, previewData, &preview)
 		if preview.Status != "previewed" || !preview.DryRun || preview.Applied {
 			t.Fatalf("unexpected pull preview: %#v", preview)
+		}
+		if !preview.Compatibility.RepositoryMatch || !preview.Compatibility.BaseAvailable || preview.Compatibility.Risk != "low" {
+			t.Fatalf("unexpected compatibility preview: %#v", preview.Compatibility)
 		}
 
 		pullData := runJSONCommand(t, []string{"pull", "--yes", "--json", id}, "pull")

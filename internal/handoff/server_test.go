@@ -74,6 +74,9 @@ func TestServerUploadDownloadAndCleanup(t *testing.T) {
 	if len(listed.Handoffs) != 1 || listed.Handoffs[0].ID != uploaded.ID || listed.Handoffs[0].Author != "Walid" {
 		t.Fatalf("unexpected inbox response: %+v", listed)
 	}
+	if listed.HasMore || listed.NextOffset != 1 {
+		t.Fatalf("unexpected pagination metadata: %+v", listed)
+	}
 	if len(listed.Handoffs[0].Files) != 0 {
 		t.Fatal("list response should not include changed paths")
 	}
@@ -131,6 +134,125 @@ func TestServerUploadDownloadAndCleanup(t *testing.T) {
 	}
 	if _, err := os.Stat(unmanagedPath); err != nil {
 		t.Fatalf("cleanup removed an unmanaged file: %v", err)
+	}
+}
+
+func TestPerUserPrivacyLifecycleCommentsAndAudit(t *testing.T) {
+	ownerToken := strings.Repeat("o", 32)
+	recipientToken := strings.Repeat("r", 32)
+	outsiderToken := strings.Repeat("x", 32)
+	service, err := newService(serviceConfig{
+		Users: []configuredUser{
+			{Token: ownerToken, ID: "owner", Name: "Owner", Role: "member", Teams: []string{"backend"}},
+			{Token: recipientToken, ID: "recipient", Name: "Recipient", Role: "member"},
+			{Token: outsiderToken, ID: "outsider", Name: "Outsider", Role: "member"},
+		},
+		DataDir: t.TempDir(), DownloadDir: t.TempDir(), MaxBytes: defaultMaxBytes, Retention: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(service.routes())
+	defer server.Close()
+
+	packagePath := filepath.Join(t.TempDir(), "private.handoff")
+	sender, _ := clonePair(t)
+	writeFile(t, filepath.Join(sender, "private.txt"), "private change\n")
+	inDirectory(t, sender, func() {
+		root, rootErr := repositoryRoot()
+		if rootErr != nil {
+			t.Fatal(rootErr)
+		}
+		selected, selectErr := selectHandoffPaths(root, nil, nil, pushModeAll)
+		if selectErr != nil {
+			t.Fatal(selectErr)
+		}
+		if _, buildErr := buildHandoffPackageFromPathsWithSharing(root, packagePath, "private", selected, pushModeAll, sharingOptions{Private: true, Recipients: []string{"recipient"}}); buildErr != nil {
+			t.Fatal(buildErr)
+		}
+	})
+	packageBytes, _ := os.ReadFile(packagePath)
+	response := request(t, http.MethodPost, server.URL+"/api/v1/handoffs", ownerToken, packageBytes)
+	if response.StatusCode != http.StatusCreated {
+		t.Fatalf("upload status = %d: %s", response.StatusCode, readBody(response.Body))
+	}
+	var uploaded handoffMetadata
+	if err := json.NewDecoder(response.Body).Decode(&uploaded); err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if uploaded.OwnerID != "owner" || uploaded.Author != "Owner" || !uploaded.Private {
+		t.Fatalf("server did not bind owner identity: %#v", uploaded)
+	}
+
+	response = request(t, http.MethodGet, server.URL+"/api/v1/handoffs/"+uploaded.ID+"/metadata", outsiderToken, nil)
+	if response.StatusCode != http.StatusNotFound {
+		t.Fatalf("private metadata leaked to outsider: %d", response.StatusCode)
+	}
+	response.Body.Close()
+	response = request(t, http.MethodGet, server.URL+"/api/v1/handoffs/"+uploaded.ID+"/metadata", recipientToken, nil)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("recipient metadata status = %d: %s", response.StatusCode, readBody(response.Body))
+	}
+	response.Body.Close()
+
+	commentBody := []byte(`{"message":"I will apply this"}`)
+	response = request(t, http.MethodPost, server.URL+"/api/v1/handoffs/"+uploaded.ID+"/comments", recipientToken, commentBody)
+	if response.StatusCode != http.StatusCreated {
+		t.Fatalf("comment status = %d: %s", response.StatusCode, readBody(response.Body))
+	}
+	response.Body.Close()
+	response = request(t, http.MethodPost, server.URL+"/api/v1/handoffs/"+uploaded.ID+"/events", recipientToken, []byte(`{"action":"acknowledged"}`))
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("acknowledge status = %d: %s", response.StatusCode, readBody(response.Body))
+	}
+	response.Body.Close()
+	response = request(t, http.MethodDelete, server.URL+"/api/v1/handoffs/"+uploaded.ID, recipientToken, nil)
+	if response.StatusCode != http.StatusForbidden {
+		t.Fatalf("recipient delete status = %d", response.StatusCode)
+	}
+	response.Body.Close()
+	response = request(t, http.MethodPost, server.URL+"/api/v1/handoffs/"+uploaded.ID+"/events", ownerToken, []byte(`{"action":"revoke"}`))
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("revoke status = %d: %s", response.StatusCode, readBody(response.Body))
+	}
+	response.Body.Close()
+	response = request(t, http.MethodGet, server.URL+"/api/v1/handoffs/"+uploaded.ID, recipientToken, nil)
+	if response.StatusCode != http.StatusNotFound {
+		t.Fatalf("revoked download status = %d", response.StatusCode)
+	}
+	response.Body.Close()
+	response = request(t, http.MethodGet, server.URL+"/api/v1/handoffs/"+uploaded.ID+"/audit", ownerToken, nil)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("audit status = %d: %s", response.StatusCode, readBody(response.Body))
+	}
+	var audit struct {
+		Events []auditEvent `json:"events"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&audit); err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if len(audit.Events) < 4 {
+		t.Fatalf("missing audit events: %#v", audit.Events)
+	}
+}
+
+func TestConfiguredUsersValidation(t *testing.T) {
+	valid := `[{"token":"` + strings.Repeat("a", 32) + `","id":"Saif","role":"member","teams":["Backend"]}]`
+	users, err := configuredUsers(valid)
+	if err != nil || len(users) != 1 || users[0].ID != "saif" || users[0].Teams[0] != "backend" {
+		t.Fatalf("configuredUsers() = %#v, %v", users, err)
+	}
+	for _, invalid := range []string{
+		`not-json`,
+		`[{"token":"short","id":"saif","role":"member"}]`,
+		`[{"token":"` + strings.Repeat("a", 32) + `","id":"saif","role":"owner"}]`,
+		`[{"token":"` + strings.Repeat("a", 32) + `","id":"same"},{"token":"` + strings.Repeat("b", 32) + `","id":"same"}]`,
+	} {
+		if _, err := configuredUsers(invalid); err == nil {
+			t.Fatalf("accepted invalid HANDOFF_USERS: %s", invalid)
+		}
 	}
 }
 

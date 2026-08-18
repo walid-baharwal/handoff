@@ -1,0 +1,16 @@
+{
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+    "target": "ES2022",
+    "module": "CommonJS",
+    "moduleResolution": "Node",
+    "types": ["node", "vscode"],
+    "skipLibCheck": true,
+    "maxNodeModuleJsDepth": 0,
+    "strict": false
+  },
+  "include": ["extension.js", "lib/**/*.js"],
+  "exclude": ["node_modules"]
+}

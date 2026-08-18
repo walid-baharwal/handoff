@@ -38,6 +38,37 @@ test("formats complete inspection details with changed paths", () => {
   assert.match(details, /src\/chat\/deleted\.ts/);
 });
 
+test("formats collaboration metadata", () => {
+  const details = handoffInspection({
+    id: "abcdef123456",
+    file_count: 1,
+    team: "backend",
+    recipients: ["saif"],
+    assigned_to: "walid",
+    lifecycle: "acknowledged",
+    comments_count: 2
+  });
+  assert.match(details, /Team: backend/);
+  assert.match(details, /Recipients: saif/);
+  assert.match(details, /Assigned to: walid/);
+  assert.match(details, /Comments: 2/);
+});
+
+test("formats repository, base, and package safety metadata", () => {
+  const details = handoffInspection({
+    id: "abc123def456",
+    project: "handoff",
+    repository_id: "github.com/example/handoff",
+    branch: "feature/inbox",
+    file_count: 2,
+    base_commit: "1234567890abcdef",
+    package_bytes: 4096
+  });
+  assert.match(details, /Repository: handoff/);
+  assert.match(details, /Base commit: 1234567890abcdef/);
+  assert.match(details, /Package size: 4,096 bytes/);
+});
+
 test("unwraps metadata passed through a tree item context command", () => {
   const handoff = { id: "abcdef123456" };
   assert.equal(handoffFromCommand({ handoff, id: "handoff:abcdef123456" }), handoff);

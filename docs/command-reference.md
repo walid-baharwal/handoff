@@ -61,7 +61,7 @@ and shell history and should be avoided.
 ## `handoff push`
 
 ```bash
-handoff push [-m MESSAGE] [--dry-run] [--json] [--interactive] \
+handoff push [-m MESSAGE] [--to USER] [--team TEAM] [--private] [--dry-run] [--json] [--interactive] \
   [--staged | --worktree] [--exclude PATH] [PATH ...]
 ```
 
@@ -79,6 +79,8 @@ handoff push --interactive -m "choose from a list"
 handoff push --staged -m "index only"
 handoff push --worktree -m "working tree only"
 handoff push --dry-run -m "preview only"
+handoff push --to saif@example.com --private -m "review this privately"
+handoff push --team backend --private -m "backend team review"
 ```
 
 Flags:
@@ -94,14 +96,30 @@ Flags:
 - `--exclude PATH` removes a literal file or directory from the selection and
   can be repeated.
 - `--json` prints the versioned machine-readable response.
+- `--to USER` adds a user ID or email recipient and can be repeated.
+- `--team TEAM` targets a server-configured team or channel.
+- `--private` restricts visibility to the owner, recipients, team members, and
+  administrators. It requires `--to` or `--team`.
 
 `--staged` and `--worktree` cannot be used together. Git LFS and submodule
 changes are not supported in version 1.
 
+## `handoff changes`
+
+```bash
+handoff changes [--json]
+```
+
+Lists the repository's final uncommitted state without changing Git staging.
+JSON includes repository identity and rich added, modified, deleted, renamed,
+conflicted, binary, staged/worktree, untracked, size, and support information.
+Editor extensions should use this command instead of launching Git once per
+file.
+
 ## `handoff list`
 
 ```bash
-handoff list [--all] [--limit N] [--json]
+handoff list [--all] [--sent] [--archived] [--limit N] [--json]
 ```
 
 Lists the newest handoffs for the current repository without changing files.
@@ -111,6 +129,8 @@ The default limit is 20; `N` must be between 1 and 100.
   token.
 - `--limit N` controls the maximum number returned.
 - `--json` prints the versioned machine-readable response.
+- `--sent` selects the authenticated user's Outbox.
+- `--archived` includes items archived by the authenticated user.
 
 ## `handoff inspect`
 
@@ -120,7 +140,8 @@ handoff inspect [--json] ID
 
 Shows sender, project, branch, message, timestamps, package size, and changed
 paths without downloading or applying the package. Sender identity comes from
-the sender's Git configuration and is self-reported.
+the sender's Git configuration on legacy shared-token servers. Per-user
+servers bind identity to the authenticated token.
 
 ## `handoff pull`
 
@@ -201,7 +222,29 @@ handoff delete ID
 ```
 
 Immediately deletes the package and its metadata from the server. This command
-does not prompt and cannot be undone through Handoff.
+does not prompt and cannot be undone through Handoff. Per-user servers permit
+this only for the owner or an administrator.
+
+## Collaboration commands
+
+Per-user servers support:
+
+```bash
+handoff whoami [--json]
+handoff comment [--json] ID MESSAGE
+handoff comments [--json] ID
+handoff acknowledge [--json] ID
+handoff applied [--json] ID
+handoff assign --target USER [--json] ID
+handoff read|unread|archive|unarchive [--json] ID
+handoff revoke [--json] ID
+handoff expire --expires-at RFC3339 [--json] ID
+handoff audit [--json] ID
+```
+
+Read/archive state is private to each authenticated user. Revoke, assignment,
+expiry, and deletion require ownership or an administrator. Revocation keeps
+metadata and audit history but prevents future package downloads.
 
 ## `handoff serve`
 
@@ -209,15 +252,16 @@ does not prompt and cannot be undone through Handoff.
 handoff serve [--address ADDRESS]
 ```
 
-Starts the self-hosted HTTP server. It requires `HANDOFF_TOKEN` with at least
-32 characters. The default listen address is `:8080`; production deployments
+Starts the self-hosted HTTP server. It requires either `HANDOFF_TOKEN` with at
+least 32 characters or `HANDOFF_USERS`. The default listen address is `:8080`; production deployments
 should put the service behind an HTTPS reverse proxy.
 
 Server settings:
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `HANDOFF_TOKEN` | required | Shared bearer token |
+| `HANDOFF_TOKEN` | required unless `HANDOFF_USERS` is set | Legacy shared administrator token |
+| `HANDOFF_USERS` | empty | JSON array of per-user tokens, IDs, names, emails, roles, and teams |
 | `HANDOFF_ADDRESS` | `:8080` | Listen address |
 | `HANDOFF_DATA_DIR` | `/data` | Package and metadata storage |
 | `HANDOFF_DOWNLOAD_DIR` | `/downloads` | Downloadable CLI binaries |
@@ -228,6 +272,19 @@ Server settings:
 
 Use a dedicated, access-controlled `HANDOFF_DATA_DIR`. Handoff normally creates,
 expires, and deletes files within that directory.
+
+Example per-user configuration (tokens must contain at least 32 characters):
+
+```json
+[
+  {"token":"...","id":"saif","name":"Saif","email":"saif@example.com","role":"member","teams":["backend"]},
+  {"token":"...","id":"walid","name":"Walid","role":"admin","teams":["backend"]}
+]
+```
+
+`HANDOFF_TOKEN` remains a legacy administrator/team token for backward
+compatibility. Use per-user tokens when private recipients, ownership, roles,
+read state, assignment, and audit attribution matter.
 
 ## `handoff version`
 

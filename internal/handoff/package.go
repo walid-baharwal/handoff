@@ -21,21 +21,25 @@ const packageVersion = 1
 var objectIDPattern = regexp.MustCompile(`^(?:[0-9a-f]{40}|[0-9a-f]{64})$`)
 
 type manifest struct {
-	Version        int       `json:"version"`
-	BaseCommit     string    `json:"base_commit"`
-	Commit         string    `json:"commit"`
-	Ref            string    `json:"ref"`
-	CreatedAt      time.Time `json:"created_at"`
-	Message        string    `json:"message,omitempty"`
-	Author         string    `json:"author,omitempty"`
-	AuthorEmail    string    `json:"author_email,omitempty"`
-	Project        string    `json:"project,omitempty"`
-	RepositoryID   string    `json:"repository_id,omitempty"`
-	Branch         string    `json:"branch,omitempty"`
-	FileCount      int       `json:"file_count,omitempty"`
-	Files          []string  `json:"files,omitempty"`
-	FilesTruncated bool      `json:"files_truncated,omitempty"`
-	BundleSHA256   string    `json:"bundle_sha256"`
+	Version        int          `json:"version"`
+	BaseCommit     string       `json:"base_commit"`
+	Commit         string       `json:"commit"`
+	Ref            string       `json:"ref"`
+	CreatedAt      time.Time    `json:"created_at"`
+	Message        string       `json:"message,omitempty"`
+	Author         string       `json:"author,omitempty"`
+	AuthorEmail    string       `json:"author_email,omitempty"`
+	Project        string       `json:"project,omitempty"`
+	RepositoryID   string       `json:"repository_id,omitempty"`
+	Branch         string       `json:"branch,omitempty"`
+	FileCount      int          `json:"file_count,omitempty"`
+	Files          []string     `json:"files,omitempty"`
+	FilesTruncated bool         `json:"files_truncated,omitempty"`
+	Changes        []fileChange `json:"changes,omitempty"`
+	Team           string       `json:"team,omitempty"`
+	Recipients     []string     `json:"recipients,omitempty"`
+	Private        bool         `json:"private,omitempty"`
+	BundleSHA256   string       `json:"bundle_sha256"`
 }
 
 func createPackage(path, bundlePath string, metadata manifest) error {
@@ -215,6 +219,29 @@ func validateManifest(value manifest) error {
 		if path == "" || len(path) > 4096 || strings.ContainsRune(path, 0) {
 			return errors.New("invalid file path in handoff manifest")
 		}
+	}
+	if len(value.Changes) > maxListedFiles || len(value.Recipients) > 50 {
+		return errors.New("invalid change or recipient summary in handoff manifest")
+	}
+	validStatuses := map[string]bool{"added": true, "modified": true, "deleted": true, "renamed": true, "conflicted": true, "untracked": true}
+	for _, change := range value.Changes {
+		if change.Path == "" || len(change.Path) > maxIncomingPathBytes || strings.ContainsRune(change.Path, 0) || !validStatuses[change.Status] || change.SizeBytes < 0 {
+			return errors.New("invalid change summary in handoff manifest")
+		}
+		if change.OriginalPath != "" && (len(change.OriginalPath) > maxIncomingPathBytes || strings.ContainsRune(change.OriginalPath, 0)) {
+			return errors.New("invalid rename summary in handoff manifest")
+		}
+	}
+	if len(value.Team) > 100 || strings.ContainsAny(value.Team, "\r\n\x00") {
+		return errors.New("invalid team in handoff manifest")
+	}
+	for _, recipient := range value.Recipients {
+		if strings.TrimSpace(recipient) == "" || len(recipient) > 254 || strings.ContainsAny(recipient, "\r\n\x00") {
+			return errors.New("invalid recipient in handoff manifest")
+		}
+	}
+	if value.Private && value.Team == "" && len(value.Recipients) == 0 {
+		return errors.New("private handoff has no recipients or team")
 	}
 	return nil
 }

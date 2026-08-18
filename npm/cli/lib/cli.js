@@ -24,6 +24,10 @@ const targets = Object.freeze({
     packageName: "@walid-baharwal/handoff-windows-x64",
     binaryName: "handoff.exe",
   }),
+  "win32-arm64": Object.freeze({
+    packageName: "@walid-baharwal/handoff-windows-arm64",
+    binaryName: "handoff.exe",
+  }),
 });
 
 function targetFor(platform = process.platform, architecture = process.arch) {

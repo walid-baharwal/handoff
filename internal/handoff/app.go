@@ -26,6 +26,8 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		err = runSetup(commandArgs, stdin, stdout)
 	case "push":
 		err = runPush(commandArgs, stdin, stdout)
+	case "changes":
+		err = runChanges(commandArgs, stdout)
 	case "pull":
 		err = runPull(commandArgs, stdin, stdout)
 	case "list":
@@ -34,6 +36,20 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		err = runInspect(commandArgs, stdout)
 	case "delete":
 		err = runDelete(commandArgs, stdout)
+	case "comment":
+		err = runComment(commandArgs, stdout)
+	case "comments":
+		err = runComments(commandArgs, stdout)
+	case "audit":
+		err = runAudit(commandArgs, stdout)
+	case "whoami":
+		err = runWhoami(commandArgs, stdout)
+	case "read", "unread", "archive", "unarchive", "acknowledge", "applied", "revoke", "assign", "expire":
+		action := map[string]string{"acknowledge": "acknowledged"}[command]
+		if action == "" {
+			action = command
+		}
+		err = runHandoffEvent(command, action, commandArgs, stdout)
 	case "continue":
 		err = runContinue(commandArgs, stdout)
 	case "abort":
@@ -68,12 +84,20 @@ func printUsage(w io.Writer) {
 
 Usage:
   handoff setup --server URL [--token-stdin]
-  handoff push [-m MESSAGE] [--dry-run] [--json] [--interactive] [--staged|--worktree] [--exclude PATH] [PATH ...]
-  handoff list [--all] [--json]
+  handoff push [-m MESSAGE] [--to USER] [--team TEAM] [--private] [--dry-run] [--json] [--interactive] [--staged|--worktree] [--exclude PATH] [PATH ...]
+  handoff changes [--json]
+  handoff list [--all] [--sent] [--archived] [--limit N] [--offset N] [--json]
   handoff inspect [--json] ID
   handoff pull [--dry-run] [--yes] [--json] [ID]
   handoff status [--json]
   handoff delete ID
+  handoff comment ID MESSAGE
+  handoff comments [--json] ID
+  handoff acknowledge|applied|revoke|archive|unarchive|read|unread [--json] ID
+  handoff assign --target USER ID
+  handoff expire --expires-at RFC3339 ID
+  handoff audit [--json] ID
+  handoff whoami [--json]
   handoff continue ID
   handoff abort ID
   handoff serve
