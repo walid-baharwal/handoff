@@ -13,7 +13,8 @@ export const platforms = Object.freeze([
   Object.freeze({ target: "linux-arm64", sourceBinary: "handoff-linux-arm64", binary: "handoff" }),
   Object.freeze({ target: "darwin-x64", sourceBinary: "handoff-darwin-amd64", binary: "handoff" }),
   Object.freeze({ target: "darwin-arm64", sourceBinary: "handoff-darwin-arm64", binary: "handoff" }),
-  Object.freeze({ target: "win32-x64", sourceBinary: "handoff-windows-amd64.exe", binary: "handoff.exe" })
+  Object.freeze({ target: "win32-x64", sourceBinary: "handoff-windows-amd64.exe", binary: "handoff.exe" }),
+  Object.freeze({ target: "win32-arm64", sourceBinary: "handoff-windows-arm64.exe", binary: "handoff.exe" })
 ]);
 
 export function validateVersion(version) {

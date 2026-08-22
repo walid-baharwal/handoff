@@ -18,13 +18,16 @@ import (
 func runList(args []string, stdout io.Writer) error {
 	fs := newSilentFlagSet("list")
 	all := fs.Bool("all", false, "list handoffs from every repository")
+	sent := fs.Bool("sent", false, "list handoffs created by the authenticated user")
+	archived := fs.Bool("archived", false, "include handoffs archived by the authenticated user")
 	jsonOutput := fs.Bool("json", false, "print machine-readable JSON")
 	limit := fs.Int("limit", 20, "maximum number of handoffs")
+	offset := fs.Int("offset", 0, "number of newer handoffs to skip")
 	if err := fs.Parse(args); err != nil {
 		return invalidArguments(err.Error())
 	}
-	if len(fs.Args()) != 0 || *limit < 1 || *limit > 100 {
-		return invalidArguments("usage: handoff list [--all] [--json] [--limit N]")
+	if len(fs.Args()) != 0 || *limit < 1 || *limit > 100 || *offset < 0 || *offset > 10000 {
+		return invalidArguments("usage: handoff list [--all] [--sent] [--archived] [--json] [--limit N] [--offset N]")
 	}
 	cfg, err := loadConfig()
 	if err != nil {
@@ -37,10 +40,11 @@ func runList(args []string, stdout io.Writer) error {
 			return err
 		}
 	}
-	items, err := listHandoffs(cfg, repositoryID, *limit)
+	page, err := listHandoffPage(cfg, repositoryID, *limit, *offset, *sent, *archived)
 	if err != nil {
 		return err
 	}
+	items := page.Handoffs
 	if *jsonOutput {
 		handoffs := make([]integrationHandoff, 0, len(items))
 		for _, item := range items {
@@ -59,12 +63,18 @@ func runList(args []string, stdout io.Writer) error {
 			Project      string               `json:"project,omitempty"`
 			RepositoryID string               `json:"repository_id,omitempty"`
 			Limit        int                  `json:"limit"`
+			Offset       int                  `json:"offset"`
+			NextOffset   int                  `json:"next_offset"`
+			HasMore      bool                 `json:"has_more"`
 			Handoffs     []integrationHandoff `json:"handoffs"`
 		}{
 			Scope:        scope,
 			Project:      responseProject,
 			RepositoryID: repositoryID,
 			Limit:        *limit,
+			Offset:       *offset,
+			NextOffset:   page.NextOffset,
+			HasMore:      page.HasMore,
 			Handoffs:     handoffs,
 		})
 	}
@@ -92,6 +102,9 @@ func runInspect(args []string, stdout io.Writer) error {
 	record, err := getHandoffMetadata(cfg, strings.ToLower(fs.Args()[0]))
 	if err != nil {
 		return err
+	}
+	if updated, updateErr := postHandoffEvent(cfg, record.ID, "read", "", ""); updateErr == nil {
+		record = updated
 	}
 	if *jsonOutput {
 		return writeIntegrationJSON(stdout, "inspect", struct {
@@ -144,53 +157,59 @@ func currentRepositoryIdentity() (repositoryID, project string, err error) {
 }
 
 func listHandoffs(cfg clientConfig, repositoryID string, limit int) ([]handoffMetadata, error) {
+	return listHandoffsWithOptions(cfg, repositoryID, limit, false, false)
+}
+
+func listHandoffsWithOptions(cfg clientConfig, repositoryID string, limit int, sent, archived bool) ([]handoffMetadata, error) {
+	page, err := listHandoffPage(cfg, repositoryID, limit, 0, sent, archived)
+	return page.Handoffs, err
+}
+
+func listHandoffPage(cfg clientConfig, repositoryID string, limit, offset int, sent, archived bool) (handoffListResponse, error) {
 	endpoint, err := url.Parse(cfg.Server + "/api/v1/handoffs")
 	if err != nil {
-		return nil, err
+		return handoffListResponse{}, err
 	}
 	query := endpoint.Query()
 	if repositoryID != "" {
 		query.Set("repository_id", repositoryID)
 	}
 	query.Set("limit", strconv.Itoa(limit))
+	query.Set("offset", strconv.Itoa(offset))
+	if sent {
+		query.Set("owner", "me")
+	}
+	if archived {
+		query.Set("archived", "true")
+	}
 	endpoint.RawQuery = query.Encode()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
+	resp, err := authenticatedRead(ctx, cfg, endpoint.String())
 	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+cfg.Token)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, commandError("server_unavailable", fmt.Errorf("list failed: %w", err))
+		return handoffListResponse{}, commandError("server_unavailable", fmt.Errorf("list failed: %w", err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, responseError("list failed", resp)
+		return handoffListResponse{}, responseError("list failed", resp)
 	}
 	var result handoffListResponse
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&result); err != nil {
-		return nil, errors.New("server returned an invalid handoff list")
+		return handoffListResponse{}, errors.New("server returned an invalid handoff list")
 	}
 	for _, record := range result.Handoffs {
 		if !idPattern.MatchString(record.ID) {
-			return nil, errors.New("server returned an invalid handoff list")
+			return handoffListResponse{}, errors.New("server returned an invalid handoff list")
 		}
 	}
-	return result.Handoffs, nil
+	return result, nil
 }
 
 func getHandoffMetadata(cfg clientConfig, id string) (handoffMetadata, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, cfg.Server+"/api/v1/handoffs/"+id+"/metadata", nil)
-	if err != nil {
-		return handoffMetadata{}, err
-	}
-	req.Header.Set("Authorization", "Bearer "+cfg.Token)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := authenticatedRead(ctx, cfg, cfg.Server+"/api/v1/handoffs/"+id+"/metadata")
 	if err != nil {
 		return handoffMetadata{}, commandError("server_unavailable", fmt.Errorf("inspect failed: %w", err))
 	}
@@ -232,6 +251,18 @@ func printHandoffMetadata(stdout io.Writer, item handoffMetadata) {
 	fmt.Fprintf(stdout, "Project: %s\n", printable(orUnknown(item.Project)))
 	fmt.Fprintf(stdout, "Branch: %s\n", printable(orUnknown(item.Branch)))
 	fmt.Fprintf(stdout, "Message: %s\n", printable(orUnknown(item.Message)))
+	if item.Team != "" {
+		fmt.Fprintf(stdout, "Team: %s\n", printable(item.Team))
+	}
+	if len(item.Recipients) > 0 {
+		fmt.Fprintf(stdout, "Recipients: %s\n", printable(strings.Join(item.Recipients, ", ")))
+	}
+	if item.AssignedTo != "" {
+		fmt.Fprintf(stdout, "Assigned to: %s\n", printable(item.AssignedTo))
+	}
+	if item.Lifecycle != "" {
+		fmt.Fprintf(stdout, "Status: %s\n", printable(item.Lifecycle))
+	}
 	if !item.CreatedAt.IsZero() {
 		fmt.Fprintf(stdout, "Created: %s (%s)\n", item.CreatedAt.Local().Format(time.RFC1123), formatAge(item.CreatedAt))
 	}

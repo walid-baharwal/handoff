@@ -6,11 +6,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
 	"time"
 )
 
-const integrationSchemaVersion = 1
+const integrationSchemaVersion = 2
 
 type integrationEnvelope struct {
 	SchemaVersion int               `json:"schema_version"`
@@ -26,22 +27,35 @@ type integrationError struct {
 }
 
 type integrationHandoff struct {
-	ID             string   `json:"id,omitempty"`
-	Project        string   `json:"project,omitempty"`
-	RepositoryID   string   `json:"repository_id,omitempty"`
-	Branch         string   `json:"branch,omitempty"`
-	Author         string   `json:"author,omitempty"`
-	AuthorEmail    string   `json:"author_email,omitempty"`
-	Message        string   `json:"message,omitempty"`
-	BaseCommit     string   `json:"base_commit,omitempty"`
-	Commit         string   `json:"commit,omitempty"`
-	CreatedAt      string   `json:"created_at,omitempty"`
-	StoredAt       string   `json:"stored_at,omitempty"`
-	ExpiresAt      string   `json:"expires_at,omitempty"`
-	FileCount      int      `json:"file_count"`
-	Files          []string `json:"files"`
-	FilesTruncated bool     `json:"files_truncated"`
-	PackageBytes   int64    `json:"package_bytes"`
+	ID             string       `json:"id,omitempty"`
+	Project        string       `json:"project,omitempty"`
+	RepositoryID   string       `json:"repository_id,omitempty"`
+	Branch         string       `json:"branch,omitempty"`
+	Author         string       `json:"author,omitempty"`
+	AuthorEmail    string       `json:"author_email,omitempty"`
+	Message        string       `json:"message,omitempty"`
+	BaseCommit     string       `json:"base_commit,omitempty"`
+	Commit         string       `json:"commit,omitempty"`
+	CreatedAt      string       `json:"created_at,omitempty"`
+	StoredAt       string       `json:"stored_at,omitempty"`
+	ExpiresAt      string       `json:"expires_at,omitempty"`
+	FileCount      int          `json:"file_count"`
+	Files          []string     `json:"files"`
+	FilesTruncated bool         `json:"files_truncated"`
+	Changes        []fileChange `json:"changes"`
+	OwnerID        string       `json:"owner_id,omitempty"`
+	Team           string       `json:"team,omitempty"`
+	Recipients     []string     `json:"recipients"`
+	Private        bool         `json:"private,omitempty"`
+	AssignedTo     string       `json:"assigned_to,omitempty"`
+	Lifecycle      string       `json:"lifecycle,omitempty"`
+	AcknowledgedBy []string     `json:"acknowledged_by"`
+	AppliedBy      []string     `json:"applied_by"`
+	RevokedAt      string       `json:"revoked_at,omitempty"`
+	CommentsCount  int          `json:"comments_count,omitempty"`
+	ViewerRead     bool         `json:"viewer_read,omitempty"`
+	ViewerArchived bool         `json:"viewer_archived,omitempty"`
+	PackageBytes   int64        `json:"package_bytes"`
 }
 
 type recoveryStatus struct {
@@ -51,6 +65,110 @@ type recoveryStatus struct {
 	ConflictedFiles []string `json:"conflicted_files"`
 	CanContinue     bool     `json:"can_continue"`
 	CanAbort        bool     `json:"can_abort"`
+}
+
+type compatibilityReport struct {
+	Repository         repositoryInfo `json:"repository"`
+	RepositoryMatch    bool           `json:"repository_match"`
+	BranchMatch        bool           `json:"branch_match"`
+	BaseAvailable      bool           `json:"base_available"`
+	BaseAncestor       bool           `json:"base_ancestor"`
+	CommitsFromBase    int            `json:"commits_from_base,omitempty"`
+	LocalChanges       []fileChange   `json:"local_changes"`
+	PotentialConflicts []string       `json:"potential_conflicts"`
+	Warnings           []string       `json:"warnings"`
+	Risk               string         `json:"risk"`
+}
+
+func inspectCompatibility(value handoffMetadata) (compatibilityReport, error) {
+	root, err := repositoryRoot()
+	if err != nil {
+		return compatibilityReport{}, err
+	}
+	repository, err := inspectRepository(root)
+	if err != nil {
+		return compatibilityReport{}, err
+	}
+	local, err := workingChanges(root)
+	if err != nil {
+		return compatibilityReport{}, err
+	}
+	report := compatibilityReport{
+		Repository:         repository,
+		RepositoryMatch:    value.RepositoryID != "" && value.RepositoryID == repository.RepositoryID,
+		BranchMatch:        value.Branch == "" || value.Branch == repository.Branch,
+		LocalChanges:       nonNilChanges(local),
+		PotentialConflicts: []string{},
+		Warnings:           []string{},
+		Risk:               "low",
+	}
+	if value.BaseCommit != "" {
+		_, baseErr := gitOutput(root, nil, "cat-file", "-e", value.BaseCommit+"^{commit}")
+		report.BaseAvailable = baseErr == nil
+		if report.BaseAvailable {
+			_, ancestorErr := gitOutput(root, nil, "merge-base", "--is-ancestor", value.BaseCommit, "HEAD")
+			report.BaseAncestor = ancestorErr == nil
+			if count, countErr := gitOutput(root, nil, "rev-list", "--count", value.BaseCommit+"..HEAD"); countErr == nil {
+				fmt.Sscanf(count, "%d", &report.CommitsFromBase)
+			}
+		}
+	}
+	if !report.RepositoryMatch {
+		report.Warnings = append(report.Warnings, "handoff repository does not match the local repository")
+		report.Risk = "blocked"
+	}
+	if !report.BranchMatch {
+		report.Warnings = append(report.Warnings, fmt.Sprintf("sender branch is %s; local branch is %s", orUnknown(value.Branch), repository.Branch))
+		report.Risk = "medium"
+	}
+	if !report.BaseAvailable {
+		report.Warnings = append(report.Warnings, "handoff base commit is not available locally; fetch before pulling")
+		if report.Risk != "blocked" {
+			report.Risk = "high"
+		}
+	}
+	if report.BaseAvailable && !report.BaseAncestor {
+		report.Warnings = append(report.Warnings, "handoff base is not an ancestor of the local branch")
+		if report.Risk != "blocked" {
+			report.Risk = "high"
+		}
+	} else if report.CommitsFromBase > 0 {
+		report.Warnings = append(report.Warnings, fmt.Sprintf("local branch is %d commit(s) ahead of the handoff base", report.CommitsFromBase))
+		if report.Risk == "low" {
+			report.Risk = "medium"
+		}
+	}
+	incoming := make(map[string]struct{})
+	for _, change := range value.Changes {
+		incoming[change.Path] = struct{}{}
+		if change.OriginalPath != "" {
+			incoming[change.OriginalPath] = struct{}{}
+		}
+	}
+	if len(incoming) == 0 {
+		for _, path := range value.Files {
+			incoming[path] = struct{}{}
+		}
+	}
+	for _, change := range local {
+		if _, found := incoming[change.Path]; found {
+			report.PotentialConflicts = append(report.PotentialConflicts, change.Path)
+		}
+		if _, found := incoming[change.OriginalPath]; change.OriginalPath != "" && found {
+			report.PotentialConflicts = append(report.PotentialConflicts, change.OriginalPath)
+		}
+	}
+	sort.Strings(report.PotentialConflicts)
+	if len(report.PotentialConflicts) > 0 {
+		report.Warnings = append(report.Warnings, "incoming paths overlap existing local changes")
+		if report.Risk != "blocked" {
+			report.Risk = "high"
+		}
+	} else if len(local) > 0 && report.Risk == "low" {
+		report.Warnings = append(report.Warnings, "existing local changes will be preserved")
+		report.Risk = "medium"
+	}
+	return report, nil
 }
 
 type codedError struct {
@@ -128,7 +246,7 @@ func writeJSONValue(w io.Writer, value any) error {
 
 func commandWantsJSON(command string, args []string) bool {
 	switch command {
-	case "push", "pull", "list", "inspect", "status":
+	case "push", "pull", "list", "inspect", "status", "changes", "comment", "comments", "audit", "whoami", "read", "unread", "archive", "unarchive", "acknowledge", "applied", "revoke", "assign", "expire":
 	default:
 		return false
 	}
@@ -158,6 +276,19 @@ func integrationHandoffFromMetadata(value handoffMetadata) integrationHandoff {
 		FileCount:      value.FileCount,
 		Files:          nonNilStrings(value.Files),
 		FilesTruncated: value.FilesTruncated,
+		Changes:        nonNilChanges(value.Changes),
+		OwnerID:        value.OwnerID,
+		Team:           value.Team,
+		Recipients:     nonNilStrings(value.Recipients),
+		Private:        value.Private,
+		AssignedTo:     value.AssignedTo,
+		Lifecycle:      value.Lifecycle,
+		AcknowledgedBy: nonNilStrings(value.AcknowledgedBy),
+		AppliedBy:      nonNilStrings(value.AppliedBy),
+		RevokedAt:      integrationTime(value.RevokedAt),
+		CommentsCount:  value.CommentsCount,
+		ViewerRead:     value.ViewerRead,
+		ViewerArchived: value.ViewerArchived,
 		PackageBytes:   value.PackageBytes,
 	}
 }
@@ -177,6 +308,12 @@ func integrationHandoffFromManifest(value manifest, id string, packageBytes int6
 		FileCount:      value.FileCount,
 		Files:          nonNilStrings(value.Files),
 		FilesTruncated: value.FilesTruncated,
+		Changes:        nonNilChanges(value.Changes),
+		Team:           value.Team,
+		Recipients:     nonNilStrings(value.Recipients),
+		Private:        value.Private,
+		AcknowledgedBy: []string{},
+		AppliedBy:      []string{},
 		PackageBytes:   packageBytes,
 	}
 }

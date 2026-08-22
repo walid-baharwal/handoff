@@ -1,7 +1,7 @@
 {
   "name": "handoff-vscode",
   "displayName": "Handoff",
-  "description": "Share and apply uncommitted Git changes through Handoff.",
+  "description": "Create, share, inspect, and safely apply uncommitted Git changes across repositories.",
   "version": "0.0.0-development",
   "publisher": "walid-baharwal",
   "license": "MIT",
@@ -19,7 +19,9 @@
     "git",
     "handoff",
     "patch",
-    "collaboration"
+    "collaboration",
+    "source control",
+    "work in progress"
   ],
   "main": "./extension.js",
   "files": [
@@ -34,24 +36,90 @@
   "extensionKind": [
     "workspace"
   ],
+  "extensionDependencies": [
+    "vscode.git"
+  ],
   "capabilities": {
     "untrustedWorkspaces": {
       "supported": false,
-      "description": "Handoff runs Git commands and changes files in the current repository."
+      "description": "Handoff runs Git commands and can apply file changes in open repositories."
     }
   },
   "activationEvents": [
-    "onView:handoff.inbox"
+    "onStartupFinished",
+    "onView:handoff.inbox",
+    "onUri"
   ],
   "contributes": {
     "commands": [
       {
         "command": "handoff.configure",
-        "title": "Handoff: Configure Server"
+        "title": "Handoff: Configure Server Profile",
+        "icon": "$(gear)"
+      },
+      {
+        "command": "handoff.testConnection",
+        "title": "Handoff: Test Connection",
+        "icon": "$(plug)"
+      },
+      {
+        "command": "handoff.selectProfile",
+        "title": "Handoff: Select Server Profile",
+        "icon": "$(server-environment)"
+      },
+      {
+        "command": "handoff.refreshRepositories",
+        "title": "Handoff: Discover Git Repositories",
+        "icon": "$(repo)"
+      },
+      {
+        "command": "handoff.refreshChanges",
+        "title": "Handoff: Refresh Changes",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "handoff.include",
+        "title": "Include in Handoff",
+        "icon": "$(add)"
+      },
+      {
+        "command": "handoff.exclude",
+        "title": "Remove from Handoff",
+        "icon": "$(remove)"
+      },
+      {
+        "command": "handoff.includeAll",
+        "title": "Handoff: Include All Changes",
+        "icon": "$(add)"
+      },
+      {
+        "command": "handoff.excludeAll",
+        "title": "Handoff: Remove All Included Changes",
+        "icon": "$(remove)"
+      },
+      {
+        "command": "handoff.discardDraft",
+        "title": "Handoff: Discard Draft",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "handoff.setAudience",
+        "title": "Handoff: Choose Recipients and Team",
+        "icon": "$(people)"
+      },
+      {
+        "command": "handoff.create",
+        "title": "Create Handoff",
+        "icon": "$(cloud-upload)"
+      },
+      {
+        "command": "handoff.openChange",
+        "title": "Handoff: Open Change"
       },
       {
         "command": "handoff.openInbox",
-        "title": "Handoff: Open Inbox"
+        "title": "Handoff: Open Inbox",
+        "icon": "$(inbox)"
       },
       {
         "command": "handoff.refreshInbox",
@@ -59,44 +127,166 @@
         "icon": "$(refresh)"
       },
       {
+        "command": "handoff.refreshRepositoryInbox",
+        "title": "Handoff: Refresh Repository",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "handoff.loadMoreInbox",
+        "title": "Handoff: Load More Inbox Items",
+        "icon": "$(more)"
+      },
+      {
+        "command": "handoff.searchInbox",
+        "title": "Handoff: Search Inbox",
+        "icon": "$(search)"
+      },
+      {
+        "command": "handoff.filterInbox",
+        "title": "Handoff: Filter Inbox",
+        "icon": "$(filter)"
+      },
+      {
+        "command": "handoff.sortInbox",
+        "title": "Handoff: Sort Inbox",
+        "icon": "$(list-ordered)"
+      },
+      {
         "command": "handoff.inspectInboxItem",
-        "title": "Handoff: Inspect Handoff"
+        "title": "Handoff: Open Details",
+        "icon": "$(info)"
       },
       {
         "command": "handoff.pullInboxItem",
-        "title": "Handoff: Pull Handoff",
+        "title": "Pull into Matching Repository",
         "icon": "$(cloud-download)"
       },
       {
+        "command": "handoff.previewPull",
+        "title": "Preview Pull Safety",
+        "icon": "$(shield)"
+      },
+      {
         "command": "handoff.copyHandoffID",
-        "title": "Handoff: Copy Handoff ID",
+        "title": "Copy Handoff ID",
         "icon": "$(copy)"
       },
       {
-        "command": "handoff.pushChanges",
-        "title": "Handoff: Push All Changes",
-        "icon": "$(cloud-upload)"
+        "command": "handoff.copyHandoffDetails",
+        "title": "Copy Handoff Details",
+        "icon": "$(clippy)"
       },
       {
-        "command": "handoff.pushSelectedChanges",
-        "title": "Handoff: Push Selected Changes",
-        "icon": "$(list-selection)"
+        "command": "handoff.copyHandoffLink",
+        "title": "Copy Handoff VS Code Link",
+        "icon": "$(link)"
+      },
+      {
+        "command": "handoff.markRead",
+        "title": "Mark Handoff Read",
+        "icon": "$(mail-read)"
+      },
+      {
+        "command": "handoff.markUnread",
+        "title": "Mark Handoff Unread",
+        "icon": "$(mail)"
+      },
+      {
+        "command": "handoff.archive",
+        "title": "Archive Handoff",
+        "icon": "$(archive)"
+      },
+      {
+        "command": "handoff.unarchive",
+        "title": "Restore Archived Handoff",
+        "icon": "$(discard)"
+      },
+      {
+        "command": "handoff.delete",
+        "title": "Delete Handoff from Server",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "handoff.comment",
+        "title": "Comment on Handoff",
+        "icon": "$(comment)"
+      },
+      {
+        "command": "handoff.showComments",
+        "title": "Show Handoff Comments",
+        "icon": "$(comments)"
+      },
+      {
+        "command": "handoff.showAudit",
+        "title": "Show Handoff Audit History",
+        "icon": "$(history)"
+      },
+      {
+        "command": "handoff.acknowledge",
+        "title": "Acknowledge Handoff",
+        "icon": "$(check)"
+      },
+      {
+        "command": "handoff.markApplied",
+        "title": "Mark Handoff Applied",
+        "icon": "$(pass)"
+      },
+      {
+        "command": "handoff.revoke",
+        "title": "Revoke Handoff",
+        "icon": "$(circle-slash)"
+      },
+      {
+        "command": "handoff.assign",
+        "title": "Assign Handoff",
+        "icon": "$(person-add)"
+      },
+      {
+        "command": "handoff.setExpiry",
+        "title": "Set Handoff Expiry",
+        "icon": "$(clock)"
       },
       {
         "command": "handoff.pullHandoff",
-        "title": "Handoff: Pull Handoff"
+        "title": "Handoff: Pull by ID"
       },
       {
         "command": "handoff.showRecovery",
-        "title": "Handoff: Show Recovery Status"
+        "title": "Handoff: Show Recovery Status",
+        "icon": "$(warning)"
       },
       {
         "command": "handoff.continueRecovery",
-        "title": "Handoff: Continue Recovery"
+        "title": "Handoff: Continue Recovery",
+        "icon": "$(debug-continue)"
       },
       {
         "command": "handoff.abortRecovery",
-        "title": "Handoff: Abort Recovery"
+        "title": "Handoff: Abort Recovery",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "handoff.openConflicts",
+        "title": "Handoff: Open Conflicted Files",
+        "icon": "$(files)"
+      },
+      {
+        "command": "handoff.copyDiagnostics",
+        "title": "Handoff: Copy Diagnostic Information",
+        "icon": "$(copy)"
+      },
+      {
+        "command": "handoff.showOutput",
+        "title": "Handoff: Show Output",
+        "icon": "$(output)"
+      },
+      {
+        "command": "handoff.pushChanges",
+        "title": "Handoff: Include All Changes"
+      },
+      {
+        "command": "handoff.pushSelectedChanges",
+        "title": "Handoff: Open Draft in Source Control"
       }
     ],
     "configuration": {
@@ -106,7 +296,64 @@
           "type": "string",
           "scope": "machine",
           "default": "",
-          "markdownDescription": "Optional path to a Handoff binary. Leave empty to use the binary bundled with this extension."
+          "markdownDescription": "Optional path to a Handoff binary. Leave empty to use the platform binary bundled with the extension."
+        },
+        "handoff.profile": {
+          "type": "string",
+          "scope": "resource",
+          "default": "",
+          "markdownDescription": "Server profile assigned to this workspace folder. Configure profiles with **Handoff: Configure Server Profile**."
+        },
+        "handoff.exclude": {
+          "type": "array",
+          "scope": "resource",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "examples": [
+            [
+              ".env*",
+              "**/*.pem",
+              "dist/**"
+            ]
+          ],
+          "markdownDescription": "Glob patterns hidden from Handoff drafts in addition to Git ignore rules."
+        },
+        "handoff.repositorySearchDepth": {
+          "type": "integer",
+          "scope": "window",
+          "default": 4,
+          "minimum": 0,
+          "maximum": 12,
+          "markdownDescription": "Maximum nested-folder depth searched for Git repositories when a parent folder is open."
+        },
+        "handoff.largeFileWarningBytes": {
+          "type": "integer",
+          "scope": "resource",
+          "default": 10485760,
+          "minimum": 1,
+          "markdownDescription": "Warn before including a file at or above this size."
+        },
+        "handoff.confirmLowRiskPull": {
+          "type": "boolean",
+          "scope": "resource",
+          "default": true,
+          "markdownDescription": "Ask for confirmation before pulls even when no compatibility warning is detected. Risky pulls always require confirmation."
+        },
+        "handoff.pollIntervalSeconds": {
+          "type": "integer",
+          "scope": "window",
+          "default": 60,
+          "minimum": 0,
+          "maximum": 3600,
+          "markdownDescription": "Inbox background refresh interval. Set to 0 to disable; values below 30 are ignored."
+        },
+        "handoff.desktopNotifications": {
+          "type": "boolean",
+          "scope": "window",
+          "default": true,
+          "markdownDescription": "Notify when a background refresh finds a new Handoff matching an open repository."
         }
       }
     },
@@ -127,9 +374,60 @@
         }
       ]
     },
+    "viewsWelcome": [
+      {
+        "view": "handoff.inbox",
+        "contents": "No Handoffs are visible yet.\n[Configure Server](command:handoff.configure)\n[Refresh Inbox](command:handoff.refreshInbox)\n\nCreate outgoing Handoffs from the native Source Control view."
+      }
+    ],
+    "walkthroughs": [
+      {
+        "id": "handoff.gettingStarted",
+        "title": "Create and receive your first Handoff",
+        "description": "Share uncommitted work without changing Git staging or creating temporary commits.",
+        "steps": [
+          {
+            "id": "handoff.configure",
+            "title": "Connect your Handoff server",
+            "description": "Run [Configure Server Profile](command:handoff.configure) and keep credentials in VS Code Secret Storage.",
+            "media": {
+              "markdown": "Create a named profile for your team server. Profiles can be assigned per workspace folder."
+            }
+          },
+          {
+            "id": "handoff.draft",
+            "title": "Build an outgoing draft",
+            "description": "Open [Source Control](command:workbench.view.scm), use **+** to include files, and write a useful message.",
+            "media": {
+              "markdown": "Handoff selection is independent from Git staging. Added, modified, deleted, renamed, conflicted, binary, and untracked files keep their native status."
+            }
+          },
+          {
+            "id": "handoff.create",
+            "title": "Create the Handoff",
+            "description": "Press **Ctrl/Cmd+Enter** in the message input or choose **Create Handoff**. The ID is copied automatically.",
+            "media": {
+              "markdown": "The preview shows the exact selected paths before upload."
+            }
+          },
+          {
+            "id": "handoff.receive",
+            "title": "Pull safely from the Inbox",
+            "description": "Open the [Handoff Inbox](command:handoff.openInbox). Compatible items are grouped by repository and previewed before pull.",
+            "media": {
+              "markdown": "Existing local changes are preserved. Conflicts surface Continue and Abort recovery actions."
+            }
+          }
+        ]
+      }
+    ],
     "menus": {
       "commandPalette": [
         {
+          "command": "handoff.openChange",
+          "when": "false"
+        },
+        {
           "command": "handoff.inspectInboxItem",
           "when": "false"
         },
@@ -138,58 +436,270 @@
           "when": "false"
         },
         {
+          "command": "handoff.previewPull",
+          "when": "false"
+        },
+        {
           "command": "handoff.copyHandoffID",
           "when": "false"
-        }
-      ],
-      "view/title": [
-        {
-          "command": "handoff.pushSelectedChanges",
-          "when": "view == handoff.inbox",
-          "group": "navigation@1"
         },
         {
-          "command": "handoff.refreshInbox",
-          "when": "view == handoff.inbox",
-          "group": "navigation@2"
-        }
-      ],
-      "view/item/context": [
-        {
-          "command": "handoff.pullInboxItem",
-          "when": "view == handoff.inbox && viewItem == handoff.inboxItem",
-          "group": "inline"
+          "command": "handoff.copyHandoffDetails",
+          "when": "false"
         },
         {
-          "command": "handoff.inspectInboxItem",
-          "when": "view == handoff.inbox && viewItem == handoff.inboxItem",
-          "group": "navigation"
+          "command": "handoff.copyHandoffLink",
+          "when": "false"
         },
         {
-          "command": "handoff.copyHandoffID",
-          "when": "view == handoff.inbox && viewItem == handoff.inboxItem",
-          "group": "navigation"
+          "command": "handoff.markRead",
+          "when": "false"
+        },
+        {
+          "command": "handoff.markUnread",
+          "when": "false"
+        },
+        {
+          "command": "handoff.archive",
+          "when": "false"
+        },
+        {
+          "command": "handoff.unarchive",
+          "when": "false"
+        },
+        {
+          "command": "handoff.delete",
+          "when": "false"
+        },
+        {
+          "command": "handoff.comment",
+          "when": "false"
+        },
+        {
+          "command": "handoff.showComments",
+          "when": "false"
+        },
+        {
+          "command": "handoff.showAudit",
+          "when": "false"
+        },
+        {
+          "command": "handoff.acknowledge",
+          "when": "false"
+        },
+        {
+          "command": "handoff.markApplied",
+          "when": "false"
+        },
+        {
+          "command": "handoff.revoke",
+          "when": "false"
+        },
+        {
+          "command": "handoff.assign",
+          "when": "false"
+        },
+        {
+          "command": "handoff.setExpiry",
+          "when": "false"
+        },
+        {
+          "command": "handoff.refreshRepositoryInbox",
+          "when": "false"
+        },
+        {
+          "command": "handoff.include",
+          "when": "false"
+        },
+        {
+          "command": "handoff.exclude",
+          "when": "false"
         }
       ],
       "scm/title": [
         {
-          "command": "handoff.pushSelectedChanges",
-          "when": "scmProvider == git",
+          "command": "handoff.create",
+          "when": "scmProvider == handoff",
           "group": "navigation@1"
         },
         {
-          "command": "handoff.pushChanges",
-          "when": "scmProvider == git",
+          "command": "handoff.refreshChanges",
+          "when": "scmProvider == handoff",
           "group": "navigation@2"
+        },
+        {
+          "command": "handoff.includeAll",
+          "when": "scmProvider == handoff",
+          "group": "2_draft@1"
+        },
+        {
+          "command": "handoff.excludeAll",
+          "when": "scmProvider == handoff",
+          "group": "2_draft@2"
+        },
+        {
+          "command": "handoff.discardDraft",
+          "when": "scmProvider == handoff",
+          "group": "2_draft@3"
+        },
+        {
+          "command": "handoff.setAudience",
+          "when": "scmProvider == handoff",
+          "group": "2_draft@4"
+        }
+      ],
+      "scm/resourceState/context": [
+        {
+          "command": "handoff.include",
+          "when": "scmProvider == handoff && scmResourceGroup == handoffChanges",
+          "group": "inline@1"
+        },
+        {
+          "command": "handoff.exclude",
+          "when": "scmProvider == handoff && scmResourceGroup == handoffIncluded",
+          "group": "inline@1"
+        },
+        {
+          "command": "handoff.openChange",
+          "when": "scmProvider == handoff",
+          "group": "navigation@1"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "handoff.searchInbox",
+          "when": "view == handoff.inbox",
+          "group": "navigation@1"
+        },
+        {
+          "command": "handoff.filterInbox",
+          "when": "view == handoff.inbox",
+          "group": "navigation@2"
+        },
+        {
+          "command": "handoff.refreshInbox",
+          "when": "view == handoff.inbox",
+          "group": "navigation@3"
+        },
+        {
+          "command": "handoff.sortInbox",
+          "when": "view == handoff.inbox",
+          "group": "2_view@1"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "handoff.refreshRepositoryInbox",
+          "when": "view == handoff.inbox && viewItem == handoff.repositoryGroup",
+          "group": "inline@1"
+        },
+        {
+          "command": "handoff.pullInboxItem",
+          "when": "view == handoff.inbox && viewItem =~ /handoff\\.inboxItem/",
+          "group": "inline@1"
+        },
+        {
+          "command": "handoff.inspectInboxItem",
+          "when": "view == handoff.inbox && viewItem =~ /handoff\\.inboxItem/",
+          "group": "navigation@1"
+        },
+        {
+          "command": "handoff.previewPull",
+          "when": "view == handoff.inbox && viewItem =~ /handoff\\.inboxItem/",
+          "group": "navigation@2"
+        },
+        {
+          "command": "handoff.copyHandoffID",
+          "when": "view == handoff.inbox && viewItem =~ /handoff\\.inboxItem/",
+          "group": "navigation@3"
+        },
+        {
+          "command": "handoff.copyHandoffDetails",
+          "when": "view == handoff.inbox && viewItem =~ /handoff\\.inboxItem/",
+          "group": "navigation@4"
+        },
+        {
+          "command": "handoff.copyHandoffLink",
+          "when": "view == handoff.inbox && viewItem =~ /handoff\\.inboxItem/",
+          "group": "navigation@5"
+        },
+        {
+          "command": "handoff.markRead",
+          "when": "view == handoff.inbox && viewItem =~ /handoff\\.inboxItem\\..*\\.unread$/",
+          "group": "2_state@1"
+        },
+        {
+          "command": "handoff.markUnread",
+          "when": "view == handoff.inbox && viewItem =~ /handoff\\.inboxItem\\..*\\.read$/",
+          "group": "2_state@1"
+        },
+        {
+          "command": "handoff.archive",
+          "when": "view == handoff.inbox && viewItem =~ /handoff\\.inboxItem\\.active/",
+          "group": "2_state@2"
+        },
+        {
+          "command": "handoff.unarchive",
+          "when": "view == handoff.inbox && viewItem =~ /handoff\\.inboxItem\\.archived/",
+          "group": "2_state@2"
+        },
+        {
+          "command": "handoff.comment",
+          "when": "view == handoff.inbox && viewItem =~ /handoff\\.inboxItem/",
+          "group": "3_collaboration@1"
+        },
+        {
+          "command": "handoff.showComments",
+          "when": "view == handoff.inbox && viewItem =~ /handoff\\.inboxItem/",
+          "group": "3_collaboration@2"
+        },
+        {
+          "command": "handoff.acknowledge",
+          "when": "view == handoff.inbox && viewItem =~ /handoff\\.inboxItem/",
+          "group": "3_collaboration@3"
+        },
+        {
+          "command": "handoff.markApplied",
+          "when": "view == handoff.inbox && viewItem =~ /handoff\\.inboxItem/",
+          "group": "3_collaboration@4"
+        },
+        {
+          "command": "handoff.assign",
+          "when": "view == handoff.inbox && viewItem =~ /handoff\\.inboxItem\\.active\\.owned/",
+          "group": "4_manage@1"
+        },
+        {
+          "command": "handoff.setExpiry",
+          "when": "view == handoff.inbox && viewItem =~ /handoff\\.inboxItem\\.active\\.owned/",
+          "group": "4_manage@2"
+        },
+        {
+          "command": "handoff.showAudit",
+          "when": "view == handoff.inbox && viewItem =~ /handoff\\.inboxItem/",
+          "group": "4_manage@3"
+        },
+        {
+          "command": "handoff.revoke",
+          "when": "view == handoff.inbox && viewItem =~ /handoff\\.inboxItem\\.active\\.owned/",
+          "group": "5_danger@1"
+        },
+        {
+          "command": "handoff.delete",
+          "when": "view == handoff.inbox && viewItem =~ /handoff\\.inboxItem\\..*\\.owned/",
+          "group": "5_danger@2"
         }
       ]
     }
   },
   "scripts": {
-    "test": "node --test",
+    "test": "npm run typecheck && node --test",
+    "typecheck": "tsc -p jsconfig.json",
     "package": "node scripts/package-vsix.mjs"
   },
   "devDependencies": {
-    "@vscode/vsce": "3.6.2"
+    "@types/node": "^24.13.3",
+    "@types/vscode": "^1.95.0",
+    "@vscode/vsce": "3.6.2",
+    "typescript": "^5.9.3"
   }
 }

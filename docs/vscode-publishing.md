@@ -64,9 +64,11 @@ test before the first Marketplace release.
 1. Merge the VS Code extension change into `sandbox`, then promote `sandbox`
    to `main` with a merge commit.
 2. Confirm CI is green on `main`.
-3. To publish to the Marketplace, confirm `VSCE_PAT` exists and the publisher
+3. Build the release candidate locally and install the matching `.vsix` with
+   **Extensions: Install from VSIX...** before creating the release tag.
+4. To publish to the Marketplace, confirm `VSCE_PAT` exists and the publisher
    name remains correct. Otherwise, Marketplace publishing is skipped.
-4. Tag a new version on `main` and push the tag.
-5. Verify the GitHub Release includes all five `.vsix` files.
-6. If Marketplace publishing was enabled, verify the listing offers the same
+5. Tag a new version on `main` and push the tag.
+6. Verify the GitHub Release includes all six `.vsix` files.
+7. If Marketplace publishing was enabled, verify the listing offers the same
    version for each platform.

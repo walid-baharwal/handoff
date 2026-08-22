@@ -1,6 +1,7 @@
 package handoff
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -98,6 +99,7 @@ var homeTemplate = template.Must(template.New("home").Parse(`<!doctype html>
             <a class="download" href="/downloads/handoff-darwin-arm64">macOS Apple Silicon</a>
             <a class="download" href="/downloads/handoff-darwin-amd64">macOS Intel</a>
             <a class="download" href="/downloads/handoff-windows-amd64.exe">Windows x64</a>
+            <a class="download" href="/downloads/handoff-windows-arm64.exe">Windows ARM64</a>
           </div>
         </div>
       </div>
@@ -132,6 +134,7 @@ type homeTemplateData struct {
 
 type serviceConfig struct {
 	Token       string
+	Users       []configuredUser
 	DataDir     string
 	DownloadDir string
 	MaxBytes    int64
@@ -143,6 +146,7 @@ type serviceConfig struct {
 
 type service struct {
 	token       string
+	users       []configuredUser
 	dataDir     string
 	downloadDir string
 	maxBytes    int64
@@ -151,6 +155,53 @@ type service struct {
 	logger      *log.Logger
 	uploadSlots chan struct{}
 	quotaMu     sync.Mutex
+}
+
+type authenticatedUser struct {
+	ID     string
+	Name   string
+	Email  string
+	Role   string
+	Teams  []string
+	Legacy bool
+}
+
+type authenticationContextKey struct{}
+
+func requestUser(r *http.Request) authenticatedUser {
+	value, _ := r.Context().Value(authenticationContextKey{}).(authenticatedUser)
+	return value
+}
+
+func (user authenticatedUser) admin() bool { return user.Role == "admin" }
+
+func (user authenticatedUser) inTeam(team string) bool {
+	for _, value := range user.Teams {
+		if value == team {
+			return true
+		}
+	}
+	return false
+}
+
+func containsIdentity(values []string, user authenticatedUser) bool {
+	for _, value := range values {
+		value = strings.ToLower(strings.TrimSpace(value))
+		if value == user.ID || (user.Email != "" && value == user.Email) {
+			return true
+		}
+	}
+	return false
+}
+
+func canView(record handoffMetadata, user authenticatedUser) bool {
+	if user.admin() || user.Legacy || record.OwnerID == user.ID || containsIdentity(record.Recipients, user) {
+		return true
+	}
+	if record.Team != "" && user.inTeam(record.Team) {
+		return true
+	}
+	return !record.Private
 }
 
 func newService(cfg serviceConfig) (*service, error) {
@@ -168,6 +219,7 @@ func newService(cfg serviceConfig) (*service, error) {
 	}
 	s := &service{
 		token:       cfg.Token,
+		users:       append([]configuredUser(nil), cfg.Users...),
 		dataDir:     cfg.DataDir,
 		downloadDir: cfg.DownloadDir,
 		maxBytes:    cfg.MaxBytes,
@@ -193,11 +245,27 @@ func (s *service) routes() http.Handler {
 	mux.Handle("GET /api/v1/auth", s.auth(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	})))
+	mux.Handle("GET /api/v1/me", s.auth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user := requestUser(r)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(struct {
+			ID     string   `json:"id"`
+			Name   string   `json:"name"`
+			Email  string   `json:"email"`
+			Role   string   `json:"role"`
+			Teams  []string `json:"teams"`
+			Legacy bool     `json:"legacy"`
+		}{ID: user.ID, Name: user.Name, Email: user.Email, Role: user.Role, Teams: nonNilStrings(user.Teams), Legacy: user.Legacy})
+	})))
 	mux.Handle("GET /api/v1/handoffs", s.auth(http.HandlerFunc(s.handleList)))
 	mux.Handle("POST /api/v1/handoffs", s.auth(http.HandlerFunc(s.handleUpload)))
 	mux.Handle("GET /api/v1/handoffs/{id}/metadata", s.auth(http.HandlerFunc(s.handleMetadata)))
 	mux.Handle("GET /api/v1/handoffs/{id}", s.auth(http.HandlerFunc(s.handleDownload)))
 	mux.Handle("DELETE /api/v1/handoffs/{id}", s.auth(http.HandlerFunc(s.handleDelete)))
+	mux.Handle("GET /api/v1/handoffs/{id}/comments", s.auth(http.HandlerFunc(s.handleComments)))
+	mux.Handle("POST /api/v1/handoffs/{id}/comments", s.auth(http.HandlerFunc(s.handleComments)))
+	mux.Handle("POST /api/v1/handoffs/{id}/events", s.auth(http.HandlerFunc(s.handleEvent)))
+	mux.Handle("GET /api/v1/handoffs/{id}/audit", s.auth(http.HandlerFunc(s.handleAudit)))
 	return s.securityHeaders(mux)
 }
 
@@ -212,12 +280,25 @@ func (s *service) securityHeaders(next http.Handler) http.Handler {
 
 func (s *service) auth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !secureTokenEqual(s.token, r.Header.Get("Authorization")) {
+		authorization := r.Header.Get("Authorization")
+		if len(s.token) >= 32 && secureTokenEqual(s.token, authorization) {
+			user := authenticatedUser{ID: "legacy-team", Name: "Handoff Team", Role: "admin", Legacy: true}
+			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), authenticationContextKey{}, user)))
+			return
+		}
+		var matched *configuredUser
+		for index := range s.users {
+			if secureTokenEqual(s.users[index].Token, authorization) {
+				matched = &s.users[index]
+			}
+		}
+		if matched == nil {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="handoff"`)
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		next.ServeHTTP(w, r)
+		user := authenticatedUser{ID: matched.ID, Name: matched.Name, Email: matched.Email, Role: matched.Role, Teams: matched.Teams}
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), authenticationContextKey{}, user)))
 	})
 }
 
@@ -321,6 +402,8 @@ func (s *service) handleUpload(w http.ResponseWriter, r *http.Request) {
 		_ = final.Close()
 		if !completed {
 			_ = os.Remove(finalPath)
+			_ = os.Remove(s.metadataPath(id))
+			s.removeCollaborationFiles(id)
 			_ = syncDirectory(s.dataDir)
 		}
 	}()
@@ -339,8 +422,22 @@ func (s *service) handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	storedAt := time.Now().UTC()
 	record := metadataFromManifest(id, packageManifest, storedAt, storedAt.Add(s.retention), written)
+	user := requestUser(r)
+	record.OwnerID = user.ID
+	if !user.Legacy {
+		if user.Name != "" {
+			record.Author = user.Name
+		}
+		if user.Email != "" {
+			record.AuthorEmail = user.Email
+		}
+	}
 	if err := writeJSONExclusive(s.metadataPath(id), record, 0o600); err != nil {
 		http.Error(w, "cannot index upload", http.StatusInternalServerError)
+		return
+	}
+	if err := s.appendAuditLocked(id, auditEvent{Action: "created", ActorID: user.ID, Actor: actorName(user), CreatedAt: storedAt}); err != nil {
+		http.Error(w, "cannot create audit history", http.StatusInternalServerError)
 		return
 	}
 	completed = true
@@ -408,6 +505,7 @@ func (s *service) handleList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	limit := 20
+	offset := 0
 	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
 		parsed, err := strconv.Atoi(raw)
 		if err != nil || parsed < 1 || parsed > 100 {
@@ -416,12 +514,21 @@ func (s *service) handleList(w http.ResponseWriter, r *http.Request) {
 		}
 		limit = parsed
 	}
+	if raw := strings.TrimSpace(r.URL.Query().Get("offset")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 0 || parsed > 10000 {
+			http.Error(w, "offset must be between 0 and 10000", http.StatusBadRequest)
+			return
+		}
+		offset = parsed
+	}
 	entries, err := os.ReadDir(s.dataDir)
 	if err != nil {
 		http.Error(w, "cannot list handoffs", http.StatusInternalServerError)
 		return
 	}
 	now := time.Now()
+	user := requestUser(r)
 	items := make([]handoffMetadata, 0)
 	for _, entry := range entries {
 		name := entry.Name()
@@ -433,7 +540,7 @@ func (s *service) handleList(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		record, err := s.loadMetadata(id)
-		if err != nil || (!record.ExpiresAt.IsZero() && !record.ExpiresAt.After(now)) {
+		if err != nil || (!record.ExpiresAt.IsZero() && !record.ExpiresAt.After(now)) || !canView(record, user) {
 			continue
 		}
 		if !s.regularDataFileExists(id + ".handoff") {
@@ -442,7 +549,18 @@ func (s *service) handleList(w http.ResponseWriter, r *http.Request) {
 		if repositoryID != "" && record.RepositoryID != repositoryID {
 			continue
 		}
+		if owner := strings.TrimSpace(r.URL.Query().Get("owner")); owner == "me" && record.OwnerID != user.ID {
+			continue
+		}
+		var states handoffViewerStates
+		_ = readOptionalJSON(s.statesPath(id), &states)
+		record.ViewerRead = states[user.ID].Read
+		record.ViewerArchived = states[user.ID].Archived
+		if record.ViewerArchived && r.URL.Query().Get("archived") != "true" {
+			continue
+		}
 		record.Files = nil
+		record.Changes = nil
 		items = append(items, record)
 	}
 	sort.Slice(items, func(i, j int) bool {
@@ -451,11 +569,16 @@ func (s *service) handleList(w http.ResponseWriter, r *http.Request) {
 		}
 		return items[i].StoredAt.After(items[j].StoredAt)
 	})
-	if len(items) > limit {
+	if offset > len(items) {
+		offset = len(items)
+	}
+	items = items[offset:]
+	hasMore := len(items) > limit
+	if hasMore {
 		items = items[:limit]
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(handoffListResponse{Handoffs: items})
+	_ = json.NewEncoder(w).Encode(handoffListResponse{Handoffs: items, NextOffset: offset + len(items), HasMore: hasMore})
 }
 
 func (s *service) handleMetadata(w http.ResponseWriter, r *http.Request) {
@@ -473,10 +596,14 @@ func (s *service) handleMetadata(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "cannot read handoff metadata", http.StatusInternalServerError)
 		return
 	}
-	if (!record.ExpiresAt.IsZero() && !record.ExpiresAt.After(time.Now())) || !s.regularDataFileExists(id+".handoff") {
+	if (!record.ExpiresAt.IsZero() && !record.ExpiresAt.After(time.Now())) || !s.regularDataFileExists(id+".handoff") || !canView(record, requestUser(r)) {
 		http.NotFound(w, r)
 		return
 	}
+	var states handoffViewerStates
+	_ = readOptionalJSON(s.statesPath(id), &states)
+	record.ViewerRead = states[requestUser(r).ID].Read
+	record.ViewerArchived = states[requestUser(r).ID].Archived
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "private, no-store")
 	_ = json.NewEncoder(w).Encode(record)
@@ -523,6 +650,16 @@ func (s *service) handleDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	s.quotaMu.Lock()
 	defer s.quotaMu.Unlock()
+	record, err := s.loadMetadata(id)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	user := requestUser(r)
+	if !user.admin() && record.OwnerID != user.ID {
+		http.Error(w, "only the owner or an administrator can delete a handoff", http.StatusForbidden)
+		return
+	}
 	packagePath := filepath.Join(s.dataDir, id+".handoff")
 	if err := os.Remove(packagePath); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -533,6 +670,9 @@ func (s *service) handleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = os.Remove(s.metadataPath(id))
+	_ = os.Remove(s.commentsPath(id))
+	_ = os.Remove(s.auditPath(id))
+	_ = os.Remove(s.statesPath(id))
 	s.logger.Printf("deleted id=%s", id)
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -544,7 +684,7 @@ func (s *service) handleDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	record, err := s.loadMetadata(id)
-	if err != nil || (!record.ExpiresAt.IsZero() && !record.ExpiresAt.After(time.Now())) {
+	if err != nil || (!record.ExpiresAt.IsZero() && !record.ExpiresAt.After(time.Now())) || !record.RevokedAt.IsZero() || !canView(record, requestUser(r)) {
 		http.NotFound(w, r)
 		return
 	}
@@ -644,6 +784,7 @@ func (s *service) cleanupExpired() {
 			if _, err := s.loadMetadata(id); err != nil {
 				_ = os.Remove(filepath.Join(s.dataDir, entry.Name()))
 				_ = os.Remove(s.metadataPath(id))
+				s.removeCollaborationFiles(id)
 				continue
 			}
 		}
@@ -652,9 +793,16 @@ func (s *service) cleanupExpired() {
 		}
 		if err := os.Remove(filepath.Join(s.dataDir, entry.Name())); err == nil {
 			_ = os.Remove(s.metadataPath(id))
+			s.removeCollaborationFiles(id)
 			s.logger.Printf("expired id=%s", id)
 		}
 	}
+}
+
+func (s *service) removeCollaborationFiles(id string) {
+	_ = os.Remove(s.commentsPath(id))
+	_ = os.Remove(s.auditPath(id))
+	_ = os.Remove(s.statesPath(id))
 }
 
 func isServiceTemporary(name string) bool {

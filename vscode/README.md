@@ -1,45 +1,72 @@
 # Handoff for Visual Studio Code
 
-Handoff lets a team share uncommitted Git changes without temporary commits,
-ZIP files, or manually applying patches.
+Create and receive Handoffs without leaving VS Code. The extension bundles the
+native Go client; a global npm installation is not required.
 
-This extension includes the appropriate Handoff binary for its platform. It
-does not require a global npm installation.
+![Files move into a Handoff draft and then into a compatible repository Inbox](resources/workflow.png)
 
-## Commands
+## Create a Handoff
 
-- **Handoff: Configure Server** saves a Handoff server URL and team token.
-- **Handoff: Open Inbox** lists handoffs for the open repository and lets you
-  inspect or pull one.
-- The **Handoff** Activity Bar view keeps the repository inbox one click away;
-  use its refresh button to load the latest handoffs, then inspect or pull one.
-- **Handoff: Push All Changes** previews every repository change and uploads
-  them after confirmation.
-- **Handoff: Push Selected Changes** previews changed paths, lets you select
-  files, and uploads only that selection.
-- **Handoff: Pull Handoff** lets you enter a handoff ID directly.
-- **Handoff: Show Recovery Status** reports conflicts and provides Continue or
-  Abort actions.
+Open **Source Control**. Every discovered Git repository has its own Handoff
+provider and independent draft:
 
-Push actions are also available from the Source Control view. Inbox entries
-show complete metadata and changed paths before pull, can copy the Handoff ID,
-and refresh automatically after Handoff operations. Active recovery is shown
-at the top of the inbox.
+1. Use **+** to move files from **Changes** to **Included in Handoff**.
+2. Write a useful message in the native Source Control input.
+3. Optionally choose recipients, a team/channel, and private visibility.
+4. Press **Ctrl/Cmd+Enter** or choose **Create Handoff**.
 
-The token is retained in VS Code Secret Storage. Handoff also saves its normal
-client configuration so the same server works in the terminal.
+Handoff selection never changes Git staging. Draft selections, messages, and
+audiences survive a window reload. Clicking a text change opens a diff;
+untracked and binary files open normally.
 
-Sender identity is taken from the sender's Git configuration and is
-self-reported until Handoff supports per-user server tokens.
+The extension discovers nested repositories, multi-root workspaces, worktrees,
+and multiple clones through VS Code's built-in Git extension. Each repository
+keeps its own branch, changes, message, and destination.
+
+## Receive a Handoff
+
+The Handoff Activity Bar contains the multi-repository Inbox. Incoming items
+are grouped by compatible local repository using the stable repository ID.
+When several clones match, Handoff asks which clone should receive the changes;
+an unrelated repository cannot be selected.
+
+Inbox actions include search, repository/author/branch/age/compatibility/team/
+outbox/assignment filters, sorting, read/unread, server-backed archive and
+restore, comments, assignment, expiry, acknowledgement, applied state, audit
+history, revoke, delete, and copyable VS Code deep links. Background refresh
+can notify you about new compatible items.
+
+Every pull shows sender metadata, changed paths, branch/base compatibility,
+existing receiver changes, and likely path conflicts before applying anything.
+Existing local work is preserved. If Git reports a conflict, the Inbox exposes
+the affected repository, conflicted files, Continue, and Abort.
+
+## Setup and profiles
+
+Run **Handoff: Configure Server Profile**. Tokens are stored in VS Code Secret
+Storage. A workspace folder can select a profile with `handoff.profile`, so
+different repositories can use different team servers.
+
+Useful settings:
+
+- `handoff.exclude`: additional draft exclusion globs.
+- `handoff.repositorySearchDepth`: nested repository discovery depth.
+- `handoff.largeFileWarningBytes`: large-file warning threshold.
+- `handoff.confirmLowRiskPull`: confirmation for low-risk pulls.
+- `handoff.pollIntervalSeconds`: background Inbox refresh interval.
+- `handoff.desktopNotifications`: notifications for new compatible items.
+- `handoff.binaryPath`: development-only custom client path.
+
+Use **Handoff: Copy Diagnostic Information** and **Handoff: Show Output** when
+reporting a problem. Tokens are redacted from diagnostics and logs.
 
 ## Requirements
 
 - VS Code 1.95 or newer.
-- Git installed and available on your PATH.
-- Access to a Handoff server and its shared team token.
+- VS Code's built-in Git extension enabled.
+- Git installed in the local, WSL, SSH, or Dev Container workspace where the
+  extension runs.
+- Access to a compatible Handoff server.
 
-## Development override
-
-Set `handoff.binaryPath` to test the extension with a local Handoff binary.
-This setting is intended for development; packaged releases use their bundled
-binary by default.
+The extension runs on the workspace side, so remote repositories use the
+binary packaged for that remote environment.
